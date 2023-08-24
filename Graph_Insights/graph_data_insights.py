@@ -5,9 +5,10 @@ import pandas as pd
 import seaborn as sns
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import numpy as np
 # Set path to folder containing graph.ml files
 
-folder_path = 'Generated Graphs/64/'
+folder_path = 'Generated_Graphs/64/'
 
 
 def check_degrees():
@@ -32,6 +33,56 @@ def check_degrees():
 
     # Plot histogram of out-degree distribution using Seaborn
     sns.histplot(data=df, bins=range(int(df.max().max())+2), alpha=0.5, kde=True)
+    plt.title('Out-degree distribution of all graphs')
+    plt.xlabel('Out-degree')
+    plt.ylabel('Frequency')
+    plt.show()
+
+
+def check_degree_distribution():
+    graph = nx.read_graphml('Generated_Graphs/64/18041-1643986141-heap.graphml')
+
+    # Compute out-degree of each node
+    out_degrees = dict(graph.out_degree())
+     
+    # Append out-degree values to np array
+
+    out_degrees_array = np.array(list(out_degrees.values()))
+    #out_degrees_list = list(out_degrees.values())
+     
+
+    print(out_degrees)
+    # Plot histogram of out-degree distribution using Seaborn
+    sns.displot(data=out_degrees, kde = True)
+    plt.title('Out-degree distribution of all graphs')
+    plt.xlabel('Out-degree')
+    plt.ylabel('Frequency')
+    plt.show()
+
+def check_all_degree_distribution():
+    aggregated_out_degrees = []
+    for filename in tqdm(os.listdir(folder_path)):
+        if filename.endswith('.graphml'):
+
+            # Read graph.ml file with NetworkX
+            G = nx.read_graphml(os.path.join(folder_path, filename))
+
+            # Compute out-degree of each node
+            out_degrees = dict(G.out_degree())
+            aggregated_out_degrees += list(out_degrees.values())
+
+    #convert to np array
+    aggregated_out_degrees = np.array(aggregated_out_degrees)
+    
+            
+    # Append out-degree values to np array
+
+    #out_degrees_list = list(out_degrees.values())
+     
+
+    print(aggregated_out_degrees)
+    # Plot histogram of out-degree distribution using Seaborn
+    sns.displot(data=aggregated_out_degrees, kde = True)
     plt.title('Out-degree distribution of all graphs')
     plt.xlabel('Out-degree')
     plt.ylabel('Frequency')
@@ -86,4 +137,4 @@ def check_can_reach_dest():
 
 
 if __name__ == '__main__':
-    check_can_reach_dest()
+    check_all_degree_distribution()
