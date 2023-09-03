@@ -20,8 +20,6 @@ def is_valid_pointer(source, heap_start, raw_data):
     return True
 
 def get_chunk_size(raw_data, source, heap_start):
-    #convert source and heap_start to big indians
-
 
     offset = source - heap_start
     if offset < 0 or offset + MALLOC_HEADER_SIZE > len(raw_data):
@@ -34,10 +32,8 @@ def get_chunk_size(raw_data, source, heap_start):
 
 def recursive_edge_addition(graph, raw_data, source, json_data, heap_start, offset_to_struct):
 
-
     if source in VISITED:
         return
-
 
 
     chunk_size = get_chunk_size(raw_data, source, heap_start)
@@ -77,7 +73,7 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
     
     
     VISITED.add(source)
-
+ 
     if chunk_size is None:
         return
     
