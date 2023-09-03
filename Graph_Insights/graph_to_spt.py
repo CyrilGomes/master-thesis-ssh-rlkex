@@ -37,7 +37,7 @@ def main():
     print(G_prime)
     # Plot graph with Graphistry
     g = graphistry.bind(source='src', destination='dst')
-    g.plot(G)
+    g.plot(G_prime)
 
 if __name__ == '__main__':
     main()
