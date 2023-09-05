@@ -4,11 +4,13 @@ import re
 import struct
 import networkx as nx
 from tqdm import tqdm
+
 POINTER_REGEX = re.compile(r"0x[1-9a-zA-Z][0-9a-zA-Z]{11}")
 POINTER_SIZE = 8
 DATA_SIZE = 16
 MALLOC_HEADER_SIZE = 2 * POINTER_SIZE  
 VISITED = set()
+
 def is_potential_pointer(value):
     return POINTER_REGEX.fullmatch(hex(value))
 
@@ -35,10 +37,8 @@ def recursive_edge_addition(graph, raw_data, source, json_data, heap_start, offs
     if source in VISITED:
         return
 
-
     chunk_size = get_chunk_size(raw_data, source, heap_start)
 
-    
     offset = source - heap_start
     update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_start, offset_to_struct)
 
@@ -46,7 +46,6 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
     pointer_count = 0
     valid_pointer_count = 0
     invalid_pointer_count = 0
-
 
     if chunk_size is not None:
         for i in range(0, chunk_size, POINTER_SIZE):
@@ -58,19 +57,13 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                 else:
                     invalid_pointer_count += 1
 
-    graph.add_node(source, label=hex(source), offset = offset_to_struct, cat=0 ,struct_size=chunk_size if chunk_size is not None else 0, pointer_count=pointer_count, valid_pointer_count=valid_pointer_count, invalid_pointer_count=invalid_pointer_count)
-    """
-    for key, value in json_data.items():
-        if hex(source)[2:] in str(value):
-            graph.nodes[source].update({'label': key, 'cat': 1})
-            break
-    """
+    graph.add_node(source, label=hex(source), cat=0 ,struct_size=chunk_size if chunk_size is not None else 0, pointer_count=pointer_count, valid_pointer_count=valid_pointer_count, invalid_pointer_count=invalid_pointer_count)
+
     if hex(source)[2:] in str(json_data["KEY_C_ADDR"]) or hex(source)[2:] in str(json_data["KEY_D_ADDR"]):
         graph.nodes[source].update({'label': "KEY", 'cat': 1})
 
     if hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]):
         graph.nodes[source].update({'label': "root"})
-    
     
     VISITED.add(source)
  
@@ -78,13 +71,13 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
         return
     
     for i in range(0, chunk_size, POINTER_SIZE):
-        update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start)
+        update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct)
 
-def update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start):
+def update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct):
     potential_pointer = struct.unpack("Q", raw_data[offset+i:offset+i+POINTER_SIZE])[0]
     if is_potential_pointer(potential_pointer):
         if is_valid_pointer(potential_pointer, heap_start, raw_data):
-            graph.add_edge(source, potential_pointer)
+            graph.add_edge(source, potential_pointer, offset=offset_to_struct)
 
             recursive_edge_addition(graph, raw_data, potential_pointer, json_data, heap_start, i)
 
@@ -108,32 +101,24 @@ def process_raw_file(raw_file, json_file):
         json_data, raw_data, graph = json.load(f), f2.read(), nx.DiGraph()
     heap_start = int(json_data["HEAP_START"], 16)
 
-
-    #get "SSH_STRUCT_ADDR" from json_data
     ssh_struct_addr = int(json_data["SSH_STRUCT_ADDR"], 16)
     recursive_edge_addition(graph, raw_data, ssh_struct_addr, json_data, heap_start, 0)
     for i in range(0, len(raw_data), POINTER_SIZE):
         global_i, potential_pointer = i + heap_start, struct.unpack("Q", raw_data[i:i+POINTER_SIZE])[0]
         recursive_edge_addition(graph, raw_data, potential_pointer, json_data, heap_start, i) if is_potential_pointer(potential_pointer) else None
 
-         
     return graph
 
 def add_root_node(graph,json,  is_ssh_struct = False):
-
-
     if is_ssh_struct:
         return
          
-         
-
-
     root_node = "root"
     graph.add_node(root_node, label=root_node, cat=0, struct_size=0, pointer_count=0, valid_pointer_count=0, invalid_pointer_count=0)
-    [graph.add_edge(root_node, node) for node in graph.nodes() if len(list(graph.predecessors(node))) == 0 and node != root_node]
+    [graph.add_edge(root_node, node, offset=0) for node in graph.nodes() if len(list(graph.predecessors(node))) == 0 and node != root_node]
 
 def main():
-    base_path, output_path = "../Data/", "Generated_Graphs"
+    base_path, output_path = "Data/", "Generated_Graphs"
     os.makedirs(output_path, exist_ok=True)
     for folder in os.listdir(base_path):
         os.makedirs(os.path.join(output_path, folder), exist_ok=True)
@@ -149,7 +134,7 @@ def generate_graph(folder, raw_file, output_path, folder_path):
     json_file = raw_file.replace("-heap.raw", ".json")
     raw_file_path, json_file_path = os.path.join(folder_path, raw_file), os.path.join(folder_path, json_file)
     graph = process_raw_file(raw_file_path, json_file_path)
-    #add_root_node(graph, json.load(open(json_file_path)), is_ssh_struct = True)
+    add_root_node(graph, json.load(open(json_file_path)), is_ssh_struct = False)
     #remove_cycles(graph)
     nx.write_graphml(graph, os.path.join(output_path, folder, raw_file.replace(".raw", ".graphml")))
     
