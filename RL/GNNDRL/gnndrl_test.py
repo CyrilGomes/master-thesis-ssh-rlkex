@@ -8,6 +8,8 @@ import numpy as np
 import os
 from rl_base.rl_environment import GraphTraversalEnv
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
 def preprocess_graph(graph):
     # Relabel the nodes to use integers
     graph = nx.convert_node_labels_to_integers(graph)
@@ -24,40 +26,56 @@ def preprocess_graph(graph):
             if isinstance(value, str):
                 del graph[u][v][key]
 
+
+    #add the "visited" property, starting at 0 to each node
+    for node, attributes in graph.nodes(data=True):
+        graph.nodes[node]["visited"] = 0
+    
+
+
+
+    #use BFS to get the tree
+     
+    graph = nx.subgraph(graph, nx.bfs_tree(graph, 0))
+    print(len(graph.nodes))
+
     return graph
 
 
 
 def load_graphs_from_directory(directory_path):
-    graph_files = [f for f in os.listdir(directory_path) if f.endswith('.gml')]
-    graphs = [nx.read_gml(os.path.join(directory_path, graph_file)) for graph_file in graph_files]
+    graph_files = [f for f in os.listdir(directory_path) if f.endswith('.graphml')]
+    graphs = [nx.read_graphml(os.path.join(directory_path, graph_file)) for graph_file in graph_files]
     return [preprocess_graph(g) for g in graphs]
 
 
 
 class GActor(torch.nn.Module):
-    def __init__(self,state_size, hidden_channels):
+    def __init__(self,state_size, hidden_channels,nb_hidden_layers=3):
         super(GActor, self).__init__()
         self.conv1 = GCNConv(state_size, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2 = [GCNConv(hidden_channels, hidden_channels) for i in range(nb_hidden_layers)]
         self.conv3 = GCNConv(hidden_channels, 1)
 
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index).relu()
-        x = self.conv2(x, edge_index).relu()
+        for conv in self.conv2:
+            x = conv(x, edge_index).relu()
+
         x = self.conv3(x, edge_index)
         return x
     
 class GCritic(torch.nn.Module):
-    def __init__(self,state_size, hidden_channels):
+    def __init__(self,state_size, hidden_channels, nb_hidden_layers=3):
         super(GCritic, self).__init__()
         self.conv1 = GCNConv(state_size, hidden_channels)
-        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.conv2 = [GCNConv(hidden_channels, hidden_channels) for i in range(nb_hidden_layers)]
         self.conv3 = GCNConv(hidden_channels, 1)
 
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index).relu()
-        x = self.conv2(x, edge_index).relu()
+        for conv in self.conv2:
+            x = conv(x, edge_index).relu()
         x = self.conv3(x, edge_index)
         return x
 
@@ -74,6 +92,7 @@ target_node = None
 for node, attributes in graph.nodes(data=True):
     if attributes["cat"] == 1:
         target_node = node
+        print("Found : " + str(node))
         break
 
 env = GraphTraversalEnv(graph=graph, target_node=target_node)
@@ -101,8 +120,9 @@ class ActorCritic(torch.nn.Module):
 
 
 state_size = env.state_size
-gactor = GActor(state_size, 64)
-gcritic = GCritic(state_size, 64)
+NB_HIDDEN_LAYERS = 4
+gactor = GActor(state_size, 128, NB_HIDDEN_LAYERS)
+gcritic = GCritic(state_size, 128, NB_HIDDEN_LAYERS)
 model = ActorCritic(gactor, gcritic)
 
 optimizer = optim.Adam(model.parameters())
@@ -110,22 +130,36 @@ optimizer = optim.Adam(model.parameters())
 # Hyperparameters
 GAMMA = 0.99
 LEARNING_RATE = 0.001
-EPISODES = 1000
+EPISODES = 100000
 
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 entropy_term = 0.001
 
+
+rewards = []
+
+
+stats = {
+             "nb_success" : 0,
+             }
 for episode in range(EPISODES):
     done = False
     state = env.reset()
     episode_reward = 0
     
+    episode_stats = {"nb_of_moves" : 0,
+             }
     while not done:
         action_probs, state_value = model(state['x'], state['edge_index'])
-
         action_dist = torch.distributions.Categorical(action_probs)
         action = action_dist.sample()
-        next_state, reward, done, _ = env.step(action.item())
+        next_state, reward, done, stat = env.step(action.item()-1)
+
+        if done and stat["found_target"] == True:
+            print(f"Found target with {episode_stats['nb_of_moves'] + 1} moves")
+            stats["nb_success"] = stats["nb_success"] + 1 
+            
+
         #print(f"Episode : {episode} \t Current Node : {env.current_node} \t Action : {action.item()-1} / {env.action_space.n}")
         
         _, next_value = model(next_state['x'], next_state['edge_index'])
@@ -145,5 +179,19 @@ for episode in range(EPISODES):
         
         episode_reward += reward
         state = next_state
+
+        episode_stats["nb_of_moves"] = episode_stats["nb_of_moves"] + 1
+        #env.render()
         
-    print(f"Episode {episode + 1}: Reward = {episode_reward}")
+    rewards.append(episode_reward)
+    #print every 500 episodes :
+    if episode % 500 == 0:
+        print(f"Episode {episode + 1}: Reward = {episode_reward} \t Nb_Moves = {episode_stats['nb_of_moves']} \t Nb_Success = {stats['nb_success']} / {episode + 1}")
+
+
+#do a rolling mean of the rewards
+rewards = np.array(rewards)
+rewards = np.convolve(rewards, np.ones((100,))/100, mode='valid')
+
+plt.plot(rewards)
+plt.show()

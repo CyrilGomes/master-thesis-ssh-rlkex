@@ -63,7 +63,7 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
         graph.nodes[source].update({'label': "KEY", 'cat': 1})
 
     if hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]):
-        graph.nodes[source].update({'label': "root"})
+        graph.nodes[source].update({'label': "SSH_STRUCT_ADDR"})
     
     VISITED.add(source)
  
@@ -129,13 +129,21 @@ def main():
             [generate_graph(folder, raw_file, output_path, folder_path) for raw_file in tqdm(raw_files)]
              
 
+
+
+
+
+
 def generate_graph(folder, raw_file, output_path, folder_path):
     VISITED.clear()
     json_file = raw_file.replace("-heap.raw", ".json")
     raw_file_path, json_file_path = os.path.join(folder_path, raw_file), os.path.join(folder_path, json_file)
     graph = process_raw_file(raw_file_path, json_file_path)
-    add_root_node(graph, json.load(open(json_file_path)), is_ssh_struct = False)
+
+
+    #add_root_node(graph, json.load(open(json_file_path)), is_ssh_struct = False)
     #remove_cycles(graph)
+    graph = nx.convert_node_labels_to_integers(graph)
     nx.write_graphml(graph, os.path.join(output_path, folder, raw_file.replace(".raw", ".graphml")))
     
 
