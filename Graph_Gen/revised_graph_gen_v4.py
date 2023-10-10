@@ -77,7 +77,7 @@ def update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap
     potential_pointer = struct.unpack("Q", raw_data[offset+i:offset+i+POINTER_SIZE])[0]
     if is_potential_pointer(potential_pointer):
         if is_valid_pointer(potential_pointer, heap_start, raw_data):
-            graph.add_edge(source, potential_pointer, offset=offset_to_struct)
+            graph.add_edge(source, potential_pointer, offset=offset+i)
 
             recursive_edge_addition(graph, raw_data, potential_pointer, json_data, heap_start, i)
 
