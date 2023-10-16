@@ -31,13 +31,6 @@ class GraphTraversalEnv(gym.Env):
             'edge_index': spaces.Tuple((spaces.Discrete(len(self.graph.nodes())), spaces.Discrete(len(self.graph.nodes()))))
         })
 
-        self.prev_dist = 8
-        self.curr_dist = self._get_dist_to_target()
-
-
-
-        
-
 
 
     def _get_dist_to_target(self):
@@ -92,7 +85,7 @@ class GraphTraversalEnv(gym.Env):
             print("NEIHBORS : ", neighbors)
 
         if action >= len(neighbors) or len(neighbors) == 0 or not is_target_reachable:
-            return self._get_obs(), 0, True, {'found_target': False}
+            return self._get_obs(), -2, True, {'found_target': False}
         
         #Printing stats for debugging
         if printing:
@@ -110,40 +103,31 @@ class GraphTraversalEnv(gym.Env):
         self.increment_visited(self.current_node)
         self.visited_stack.append(self.current_node)
         
-        r_global = 0
-        #check if the current node is the target node
-        if has_found_target:
-            r_global = 3
-            #print("Found the target node !!")
-        else :
-            reachable = nx.has_path(self.graph, self.current_node, self.target_node)
-            if reachable:
-                dist = self._get_dist_to_target()
-                
-                r_global = 1/dist
-            else :
-                r_global = 0
+        if self.current_node == self.target_node:
+            reward = 100 - len(self.visited_stack)
+            return self._get_obs(), reward, True, {'found_target': True}
 
 
-        r_efficiency = 1/len(self.visited_stack)
+        #check if has neighbors
+        if len(list(self.graph.neighbors(self.current_node))) == 0:
+            reward = -5 + len(self.visited_stack)
+            return self._get_obs(), reward, True, {'found_target': False}
 
-        r_newly_visited = 0
-        if self.current_node not in self.visited_stack:
-            r_newly_visited = 1
-        else :
-            r_newly_visited = 0
 
-        #check if it has neighbours, if no then stop
-        has_neighbors = len(list(self.graph.neighbors(self.current_node))) > 0
-        if has_neighbors:
+        #check if target is reachable
+        reachable = nx.has_path(self.graph, self.current_node, self.target_node)
+
+        r_dist = 0
+        if reachable:
+            #add a small reward if it get closer to the target
+            dist_to_target = self._get_dist_to_target()
+            r_dist += 1/dist_to_target
             self._update_action_space()
-        else:
-            if has_found_target:
-                return self._get_obs(), 0.6*r_global + 0.2*r_efficiency + 0.2*r_newly_visited, True, {'found_target': True}
+
+        return self._get_obs(), r_dist, False, {'found_target': False}
+
+
         
-        is_done = not has_neighbors
-        #print(is_done)
-        return self._get_obs(), 0.6*r_global + 0.2*r_efficiency + 0.2*r_newly_visited, is_done, {'found_target': False}
 
 
 
@@ -198,6 +182,7 @@ class GraphTraversalEnv(gym.Env):
         ] for node, data in subgraph.nodes(data=True)], dtype=torch.float)
 
         x = torch.cat((x, pos_enc), dim=1)
+        
         # Build edge index for the subgraph
         edge_list = [(self.current_node, neighbor) for neighbor in self.graph.neighbors(self.current_node)]
         edge_index = [[], []]
@@ -209,7 +194,7 @@ class GraphTraversalEnv(gym.Env):
             edge_index[0].append(src)
             edge_index[1].append(dst)
 
-
+        
         edge_index = torch.tensor(edge_index, dtype=torch.long)
 
         #check if the shape of x is equal to self.state_size

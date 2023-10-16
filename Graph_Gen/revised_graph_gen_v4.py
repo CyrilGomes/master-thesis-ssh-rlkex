@@ -46,6 +46,10 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
     pointer_count = 0
     valid_pointer_count = 0
     invalid_pointer_count = 0
+    first_valid_pointer_offset = -1
+    first_pointer_offset = -1
+    last_valid_pointer_offset = -1
+    last_pointer_offset = -1
 
     if chunk_size is not None:
         for i in range(0, chunk_size, POINTER_SIZE):
@@ -53,11 +57,35 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
             if is_potential_pointer(potential_pointer):
                 pointer_count += 1
                 if is_valid_pointer(potential_pointer, heap_start, raw_data):
+                    last_valid_pointer_offset = i/chunk_size
+                    if first_valid_pointer_offset is None:
+                        first_valid_pointer_offset = i/chunk_size
+
+
+
                     valid_pointer_count += 1
                 else:
+                    last_pointer_offset = i/chunk_size
+                    if first_pointer_offset is None:
+                        first_pointer_offset = i/chunk_size
                     invalid_pointer_count += 1
 
-    graph.add_node(source, label=hex(source), cat=0 ,struct_size=chunk_size if chunk_size is not None else 0, pointer_count=pointer_count, valid_pointer_count=valid_pointer_count, invalid_pointer_count=invalid_pointer_count)
+    struct_size_normalized = chunk_size if chunk_size is not None else 0
+    #divide struct size by the heap size
+    struct_size_normalized = struct_size_normalized/ len(raw_data)
+
+    valid_pointer_count_normalized = valid_pointer_count / pointer_count if pointer_count != 0 else 0
+    invalid_pointer_count_normalized = invalid_pointer_count / pointer_count if pointer_count != 0 else 0
+    graph.add_node(source,
+                   label=hex(source),
+                   cat=0,
+                   struct_size=struct_size_normalized,
+                   valid_pointer_count=valid_pointer_count_normalized,
+                   invalid_pointer_count=invalid_pointer_count_normalized,
+                   first_pointer_offset=first_pointer_offset,
+                   last_pointer_offset=last_pointer_offset,
+                   first_valid_pointer_offset=first_valid_pointer_offset,
+                   last_valid_pointer_offset=last_valid_pointer_offset)
 
     if hex(source)[2:] in str(json_data["KEY_C_ADDR"]) or hex(source)[2:] in str(json_data["KEY_D_ADDR"]):
         graph.nodes[source].update({'label': "KEY", 'cat': 1})
@@ -71,13 +99,13 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
         return
     
     for i in range(0, chunk_size, POINTER_SIZE):
-        update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct)
+        update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct, chunk_size)
 
-def update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct):
+def update_potential_pointer(graph, raw_data, source, offset, i, json_data, heap_start, offset_to_struct, chunk_size):
     potential_pointer = struct.unpack("Q", raw_data[offset+i:offset+i+POINTER_SIZE])[0]
     if is_potential_pointer(potential_pointer):
         if is_valid_pointer(potential_pointer, heap_start, raw_data):
-            graph.add_edge(source, potential_pointer, offset=offset+i)
+            graph.add_edge(source, potential_pointer, offset= (offset+i)/chunk_size)
 
             recursive_edge_addition(graph, raw_data, potential_pointer, json_data, heap_start, i)
 
@@ -128,9 +156,6 @@ def main():
             raw_files = [f for f in os.listdir(folder_path) if f.endswith(".raw")]
             [generate_graph(folder, raw_file, output_path, folder_path) for raw_file in tqdm(raw_files)]
              
-
-
-
 
 
 

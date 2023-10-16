@@ -13,7 +13,9 @@ from torch_geometric.utils import from_networkx
 from collections import deque
 import numpy as np
 import keyboard
-
+from torch_geometric.nn import GraphConv, TopKPooling
+from torch_geometric.nn import global_max_pool as gmp
+from torch_geometric.nn import global_mean_pool as gap
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -62,24 +64,30 @@ from torch_geometric.nn import NNConv
 
 
 
+
 class PolicyNetwork(torch.nn.Module):
-    def __init__(self, node_feature_size, edge_feature_size):
+    def __init__(self, num_features):
         super(PolicyNetwork, self).__init__()
 
-        self.g_conv = GCNConv(5, 128)
-        self.g_prime_conv = GCNConv(8, 128)
+        self.conv1 = GCNConv(num_features, 128)
+        self.conv2 = GCNConv(128, 1)  # The output is a single value, which represents the probability of the edge being taken.
 
-        self.action_head_1 = torch.nn.Linear(256, 128)
-        self.action_head_2 = torch.nn.Linear(128, 64)
-        self.action_head_3 = torch.nn.Linear(64, 32)
-        self.action_head_4 = torch.nn.Linear(32, 16)
-        self.action_head_5 = torch.nn.Linear(16, 10)
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
         
-        self.dropout = torch.nn.Dropout(0.5)  # Add dropout after each linear layer
-
-        self.saved_log_probs = []
-        self.rewards = []
-
+        # Pass data through first GCN layer
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        
+        # Pass data through second GCN layer
+        x = self.conv2(x, edge_index)
+        
+        # Generate edge probabilities using the pairwise node embeddings
+        start_nodes = x[edge_index[0]]
+        end_nodes = x[edge_index[1]]
+        edge_probs = torch.sigmoid((start_nodes * end_nodes).sum(dim=1))
+        
+        return edge_probs
 
     def normalize_features(self, data):
         """
@@ -103,36 +111,6 @@ class PolicyNetwork(torch.nn.Module):
 
         return data
 
-    def forward(self, data, data_prime):
-
-
-        # For the main graph
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        x = F.relu(self.g_conv(x, edge_index))
-        x_global = global_mean_pool(x, torch.zeros(data.num_nodes, dtype=torch.long).to(device))
-
-        # For the agent's state (G')
-        x_prime, edge_index_prime, edge_attr_prime = data_prime.x, data_prime.edge_index, data_prime.edge_attr
-        x_prime = F.relu(self.g_prime_conv(x_prime, edge_index_prime))
-        x_prime_global = global_mean_pool(x_prime, torch.zeros(data_prime.num_nodes, dtype=torch.long).to(device))
-
-        # Combine the embeddings
-        combined_x = torch.cat([x_global, x_prime_global], dim=1).to(device)
-
-        # Action probabilities with dropout
-        action1 = F.relu(self.action_head_1(combined_x))
-        
-        action2 = F.relu(self.action_head_2(action1))
-
-        action3 = F.relu(self.action_head_3(action2))
-
-        action4 = F.relu(self.action_head_4(action3))
-
-        action5 = self.action_head_5(action4)
-        action_probs = F.softmax(action5, dim=-1)
-         
-    
-        return action_probs
 
 FILE = "Generated_Graphs/64/18038-1643986141-heap.graphml"
 graph = nx.read_graphml(FILE)
@@ -153,7 +131,7 @@ def graph_to_data(graph):
             data['pointer_count'],
             data['valid_pointer_count'],
             data['invalid_pointer_count'],
-            data['visited']
+            #data['visited']
         ] for node, data in graph.nodes(data=True)], dtype=torch.float)
     
     # Edge indices
@@ -239,6 +217,7 @@ episode = 0
 
 success_window_size = 100
 windowed_success = 0
+model.train()
 while True:
     if keyboard.is_pressed('q'):
         break
