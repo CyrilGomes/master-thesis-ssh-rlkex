@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 import keyboard
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
-from rl_base.rl_environment_negative_reward import GraphTraversalEnv
+
+from rl_base.rl_environment import GraphTraversalEnv
 from collections import deque
 import numpy as np
 import random
@@ -23,6 +24,11 @@ from collections import namedtuple, deque
 #import range tqdm
 from tqdm import tqdm
 from tqdm import trange
+from torch_geometric.nn import GCNConv
+from torch_geometric.data import Batch
+from torch_geometric.data import DataLoader, Batch
+import torch.nn.functional as F
+
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -31,8 +37,45 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # GRAPH PROCESSING
 # -------------------------
 
+class GNN(torch.nn.Module):
+    def __init__(self, dimension=7):
+        super(GNN, self).__init__()
+        self.conv1 = GCNConv(dimension, 16)
+        self.conv2 = GCNConv(16, 1)
+
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.dropout(x, training=self.training)
+        x = self.conv2(x, edge_index)
+        # Use global_mean_pool to compute the mean for each graph in the batch
+        x = torch.sigmoid(global_mean_pool(x, batch))
+        return x
 
 
+
+def connect_components(graph):
+    undi_graph = graph.to_undirected()
+
+    # Connect components
+    components = list(nx.connected_components(undi_graph))
+    for i in range(1, len(components)):
+
+        graph.add_edge(random.choice(list(components[0])), random.choice(list(components[i])), offset=0)
+        graph.add_edge(random.choice(list(components[i])), random.choice(list(components[0])), offset=0)
+
+    return graph
+
+def add_global_root_node(graph):
+    root_node = "root"
+    graph.add_node(root_node, label=root_node, cat=0, struct_size=0, pointer_count=0, valid_pointer_count=0, invalid_pointer_count=0, first_pointer_offset=0, last_pointer_offset=0, first_valid_pointer_offset=0, last_valid_pointer_offset=0, visited=1)
+    [graph.add_edge(root_node, node, offset=0) for node in graph.nodes() if len(list(graph.predecessors(node))) == 0 and node != root_node]
+    return graph
+
+
+def remove_all_isolated_nodes(graph):
+    graph.remove_nodes_from(list(nx.isolates(graph)))
+    return graph
 def preprocess_graph(graph):
     graph = nx.convert_node_labels_to_integers(graph)
     
@@ -46,9 +89,12 @@ def preprocess_graph(graph):
         for key in list(attributes):
             if isinstance(attributes[key], str):
                 del attributes[key]
-
     nx.set_node_attributes(graph, 0, 'visited')
-    graph = nx.subgraph(graph, nx.bfs_tree(graph, 0))
+    #graph = connect_components(graph)
+    #graph = nx.subgraph(graph, nx.bfs_tree(graph, 0))
+    graph = remove_all_isolated_nodes(graph)
+    #graph = add_global_root_node(graph)
+
     return graph
 
 def load_graphs_from_directory(directory_path):
@@ -214,20 +260,21 @@ class Agent:
 # Load and preprocess graph
 
 FOLDER = "Generated_Graphs/64/"
-agent = Agent(12, 10, seed=0)
+agent = Agent(10, 50, seed=0)
 
 
-def execute_for_graph(file, training = True):
+def execute_for_graph(file, training = True, level = 0):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
     target_node = next((node for node, attributes in graph.nodes(data=True) if attributes["cat"] == 1), None)
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_node)
+    env = GraphTraversalEnv(graph, target_node, level)
     windowed_success = 0
     num_episodes = 3000
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
+    max_reward = -500
     for episode in range_episode:
 
         observation = env.reset()
@@ -250,11 +297,15 @@ def execute_for_graph(file, training = True):
                 break
             observation = new_observation
 
-        range_episode.set_description(f"Current Episode Reward : {episode_reward}")
+        if episode_reward > max_reward:
+            max_reward = episode_reward
+
+        avg_reward = np.mean(episode_rewards[-100:])
+        range_episode.set_description(f"Max Episode Reward : {max_reward:.2f} Avg Reward : {avg_reward:.2f} Success Rate : {(stats['nb_success'] / (episode + 1)):.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
     
-    return episode_rewards
+    return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:
         #    print(f"Episode {episode + 1}: Reward = {episode_reward} \t Nb_Moves = {episode_stats['nb_of_moves']} \t Nb_Success = {stats['nb_success']} / {episode + 1}")
@@ -264,7 +315,7 @@ def execute_for_graph(file, training = True):
 
 def visualize(rewards):
     # Visualization
-    window_size = 10
+    window_size = 30
     success_array = np.array(rewards)
     success = np.convolve(success_array, np.ones((window_size,))/window_size, mode='valid')
     plt.plot(success)
@@ -273,17 +324,28 @@ def visualize(rewards):
 
 #take random files from folder and execute
 nb_random_files = 6
-random_files = random.sample(os.listdir(FOLDER), nb_random_files)
-for file in random_files:
-    if file.endswith(".graphml"):
-        print(f"Executing Training for {file}")
-        execute_for_graph(FOLDER + file, True)
-        
+
+max_levels = 4
+for level in range( max_levels):
+    random_files = random.sample(os.listdir(FOLDER), nb_random_files)
+    i = 0
+    for file in random_files:
+        if file.endswith(".graphml"):
+            i+=1
+            print(f"[{i} / {nb_random_files}] : Executing Training for {file}")
+            execute_for_graph(FOLDER + file, True, level)
+    
+    #take random file from folder and execute
+    random_file = random.choice(os.listdir(FOLDER))
+    print(f"Executing Testing for {random_file}")
+    rewards, succes_rate = execute_for_graph(FOLDER + random_file, False, level)
+    print(f"Success rate : {succes_rate}")
 
 #take random file from folder and execute
 random_file = random.choice(os.listdir(FOLDER))
 print(f"Executing Testing for {random_file}")
-rewards = execute_for_graph(FOLDER + random_file, False)
+rewards, succes_rate = execute_for_graph(FOLDER + random_file, False, 0)
+print(f"Success rate : {succes_rate}")
 visualize(rewards)
 
         

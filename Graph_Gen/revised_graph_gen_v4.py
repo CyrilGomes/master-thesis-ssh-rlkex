@@ -27,7 +27,7 @@ def get_chunk_size(raw_data, source, heap_start):
     if offset < 0 or offset + MALLOC_HEADER_SIZE > len(raw_data):
         return None
     size = struct.unpack("Q", raw_data[offset-POINTER_SIZE:offset])[0]
-    if size > 2561:
+    if size > len(raw_data):
         return None
     
     return size & ~0x07  

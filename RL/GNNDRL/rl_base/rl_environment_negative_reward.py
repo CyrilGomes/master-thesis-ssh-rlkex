@@ -22,7 +22,7 @@ class GraphTraversalEnv(gym.Env):
         self.visited_stack = []
 
 
-        self.state_size = 12
+        self.state_size = 10
         # Update action space for the current node
         self._update_action_space()
         
@@ -39,8 +39,15 @@ class GraphTraversalEnv(gym.Env):
 
 
     def _sample_start_node(self):
+        
+        random_node = None
+        while random_node == None or random_node == self.target_node:
 
-        return 0
+            random_node = np.random.choice(list(self.graph.nodes()))
+            is_target_reachable = nx.has_path(self.graph, random_node, self.target_node)
+            if len(list(self.graph.neighbors(random_node))) == 0 or not is_target_reachable:
+                random_node = None
+        return random_node
         #get all nodes that has neighbours
         #nodes = [node for node in self.graph.nodes() if len(list(self.graph.neighbors(node))) > 0]
         best_path = nx.shortest_path(self.graph, 0, self.target_node)
@@ -56,6 +63,7 @@ class GraphTraversalEnv(gym.Env):
         # Number of neighbors
         #TODO : Add + 1 for Backtrack
         
+
         num_actions = len(list(self.graph.neighbors(self.current_node)))
         self.action_space = spaces.Discrete(num_actions)
         
@@ -81,11 +89,11 @@ class GraphTraversalEnv(gym.Env):
 
                 
 
-        if len(neighbors) > 10:
+        if len(neighbors) > 50:
             print("NEIHBORS : ", neighbors)
 
         if action >= len(neighbors) or len(neighbors) == 0 or not is_target_reachable:
-            return self._get_obs(), -2, True, {'found_target': False}
+            return self._get_obs(), -6, True, {'found_target': False}
         
         #Printing stats for debugging
         if printing:
@@ -104,13 +112,13 @@ class GraphTraversalEnv(gym.Env):
         self.visited_stack.append(self.current_node)
         
         if self.current_node == self.target_node:
-            reward = 100 - len(self.visited_stack)
+            reward = 100 + 1/len(self.visited_stack)
             return self._get_obs(), reward, True, {'found_target': True}
 
 
         #check if has neighbors
         if len(list(self.graph.neighbors(self.current_node))) == 0:
-            reward = -5 + len(self.visited_stack)
+            reward = -5
             return self._get_obs(), reward, True, {'found_target': False}
 
 
@@ -125,11 +133,6 @@ class GraphTraversalEnv(gym.Env):
             self._update_action_space()
 
         return self._get_obs(), r_dist, False, {'found_target': False}
-
-
-        
-
-
 
 
         
@@ -181,7 +184,7 @@ class GraphTraversalEnv(gym.Env):
             
         ] for node, data in subgraph.nodes(data=True)], dtype=torch.float)
 
-        x = torch.cat((x, pos_enc), dim=1)
+        #x = torch.cat((x, pos_enc), dim=1)
         
         # Build edge index for the subgraph
         edge_list = [(self.current_node, neighbor) for neighbor in self.graph.neighbors(self.current_node)]
