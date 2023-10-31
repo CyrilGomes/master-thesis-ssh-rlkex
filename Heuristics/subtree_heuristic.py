@@ -159,12 +159,28 @@ def export_model(model, path, loader):
 
     torch.save(model, os.path.join(path, 'model.pt'))
 
+    
+class GNN(torch.nn.Module):
+    def __init__(self, dimension=7):
+        super(GNN, self).__init__()
+        self.conv1 = GCNConv(dimension, 16)
+        self.conv2 = GCNConv(16, 1)
+
+    def forward(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.dropout(x, training=self.training)
+        x = self.conv2(x, edge_index)
+        # Use global_mean_pool to compute the mean for each graph in the batch
+        x = torch.sigmoid(global_mean_pool(x, batch))
+        return x
+    
 
 def main():
     
     file_names = os.listdir('Generated_Graphs/64')
     #keep only the first 100 graphs
-    filtered_file_names = file_names[0:250]
+    filtered_file_names = file_names[0:20]
     subgraphs_data = []
     for file_name in filtered_file_names:
         subgraphs_data += create_subgraph_data(os.path.join('Generated_Graphs/64', file_name))
