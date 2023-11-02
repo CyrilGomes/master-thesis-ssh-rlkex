@@ -11,7 +11,6 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import keyboard
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv, global_mean_pool
 
 from rl_base.rl_environment import GraphTraversalEnv
 from collections import deque
@@ -24,11 +23,15 @@ from collections import namedtuple, deque
 #import range tqdm
 from tqdm import tqdm
 from tqdm import trange
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATConv
 from torch_geometric.data import Batch
 from torch_geometric.data import DataLoader, Batch
 import torch.nn.functional as F
 
+
+from torch_geometric.nn import GCNConv, global_mean_pool, SAGPooling
+from torch_geometric.data import Data
+import torch_geometric.transforms as T
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -36,6 +39,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # -------------------------
 # GRAPH PROCESSING
 # -------------------------
+
 
 #class used for rl_environment for graph heuristic
 class GNN(torch.nn.Module):
@@ -135,26 +139,32 @@ UPDATE_EVERY = 4        # how often to update the network
 # -------------------------
 # MODEL DEFINITION
 # -------------------------
-class QNetwork(torch.nn.Module):
-    def __init__(self, node_feature_size, action_size, seed):
-        super(QNetwork, self).__init__()
+
+
+class GraphQNetwork(torch.nn.Module):
+    def __init__(self, node_feature_size, action_size, seed, heads=4):
+        super(GraphQNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
-
-
-        self.fc1 = torch.nn.Linear(node_feature_size, 128)
-        self.fc2 = torch.nn.Linear(128, 128)
+        
+        # Using Graph Attention Networks (GAT)
+        self.conv1 = GATConv(node_feature_size, 32 // heads, heads=heads, concat=True)
+        self.conv2 = GATConv(32, 32 // heads, heads=heads, concat=True)
 
         # Dueling DQN
-        self.value_stream = torch.nn.Linear(128, 128)
-        self.value = torch.nn.Linear(128, 1)
+        self.value_stream = torch.nn.Linear(32, 32)
+        self.value = torch.nn.Linear(32, 1)
         
-        self.advantage_stream = torch.nn.Linear(128, 128)
-        self.advantage = torch.nn.Linear(128, action_size)
+        self.advantage_stream = torch.nn.Linear(32, 32)
+        self.advantage = torch.nn.Linear(32, action_size)
 
-
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+        
+        x = F.elu(self.conv1(x, edge_index))
+        x = F.elu(self.conv2(x, edge_index))
+        
+        # Global pooling
+        x = global_mean_pool(x, data.batch)
         
         value = F.relu(self.value_stream(x))
         value = self.value(value)
@@ -163,7 +173,7 @@ class QNetwork(torch.nn.Module):
         advantage = self.advantage(advantage)
         
         # Combine value and advantage streams
-        qvals = value + (advantage - advantage.mean())
+        qvals = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return qvals
 
 
@@ -178,8 +188,8 @@ class Agent:
         self.seed = random.seed(seed)
 
         # Q-Network
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_local = GraphQNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_target = GraphQNetwork(state_size, action_size, seed).to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
 
         # Replay memory
@@ -188,7 +198,14 @@ class Agent:
 
         self.t_step = 0
 
+        self.losses = []
+
     def step(self, state, action, reward, next_state, done):
+        #ensure everything is on device
+        state = state.to(device)
+        next_state = next_state.to(device)
+
+
         # Save experience in replay memory
         e = self.experience(state, action, reward, next_state, done)
         self.memory.append(e)
@@ -202,7 +219,7 @@ class Agent:
 
     def act(self, state, eps=0.):
         
-        state = state.float().unsqueeze(0).to(device)
+        state = state.to(device)
         self.qnetwork_local.eval()
         with torch.no_grad():
             action_values = self.qnetwork_local(state)
@@ -221,6 +238,10 @@ class Agent:
         indices = self.qnetwork_local(next_states).detach().argmax(1).unsqueeze(1)
         Q_targets_next = self.qnetwork_target(next_states).detach().gather(1, indices)
 
+        # Reshape rewards and dones to be column vectors
+        rewards = rewards.unsqueeze(1)
+        dones = dones.unsqueeze(1)
+
         # Compute Q targets for current states
         Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
 
@@ -229,12 +250,15 @@ class Agent:
 
         # Compute loss
         loss = F.mse_loss(Q_expected, Q_targets)
+        self.losses.append(loss.item())
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
         # Soft update target network
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
+
+
 
     def soft_update(self, local_model, target_model, tau):
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
@@ -243,14 +267,17 @@ class Agent:
     def sample(self):
         experiences = random.sample(self.memory, k=BATCH_SIZE)
 
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
-        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
+        states = Batch.from_data_list([e.state for e in experiences if e is not None]).to(device)
+        
+        actions = torch.tensor([e.action for e in experiences if e is not None], dtype=torch.long).unsqueeze(-1).to(device)
+        rewards = torch.tensor([e.reward for e in experiences if e is not None]).to(device)
+        
+        # You should handle next_states in the same manner as states, given that it also contains graph data
+        next_states = Batch.from_data_list([e.next_state for e in experiences if e is not None]).to(device)
+        
+        dones = torch.tensor([torch.tensor(e.done, dtype=torch.uint8) for e in experiences if e is not None]).to(device).float()
 
         return (states, actions, rewards, next_states, dones)
-
 
 
 
@@ -279,6 +306,15 @@ def check_parameters(env):
     
     
 
+def plot_loss(losses):
+    plt.plot(losses)
+    #plot averaged windowed loss
+    window_size = 100
+    averaged_losses = np.convolve(losses, np.ones((window_size,))/window_size, mode='valid')
+    plt.plot(averaged_losses)
+
+    plt.show()
+
 def execute_for_graph(file, training = True, level = 0):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
@@ -300,12 +336,12 @@ def execute_for_graph(file, training = True, level = 0):
         eps = eps * EPS_DECAY if training else 0.0
 
         while True:
-            first_node = observation.x[0]
-            action = agent.act(first_node, eps)
+            #first_node = observation.x[0]
+            action = agent.act(observation, eps)
             new_observation, reward, done, info = env.step(action, False)
             episode_reward += reward
             if training:
-                agent.step(first_node, action, reward, new_observation.x[0], done)
+                agent.step(observation, action, reward, new_observation, done)
 
             episode_stats["nb_of_moves"] += 1
             if done:
@@ -323,10 +359,14 @@ def execute_for_graph(file, training = True, level = 0):
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
     
+
+    plot_loss(agent.losses)
     return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:
         #    print(f"Episode {episode + 1}: Reward = {episode_reward} \t Nb_Moves = {episode_stats['nb_of_moves']} \t Nb_Success = {stats['nb_success']} / {episode + 1}")
+
+
 
 
 
@@ -340,10 +380,12 @@ def visualize(rewards):
     plt.show()
 
 
+print("Launching on device : ", device)
+
 #take random files from folder and execute
 nb_random_files = 6
-
 max_levels = 4
+
 for level in range( max_levels):
     random_files = random.sample(os.listdir(FOLDER), nb_random_files)
     i = 0

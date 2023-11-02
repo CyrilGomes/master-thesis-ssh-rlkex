@@ -32,6 +32,10 @@ class GraphTraversalEnv(gym.Env):
         self.visited_stack = []
 
         self.promising_nodes = self._get_most_promising_subgraph()
+        self.sorted_promising_nodes = self.sort_promosing_nodes()
+        self.current_node_iterator = 0
+        #self.centrality = nx.betweenness_centrality(self.graph)
+
         self.current_node = self._sample_start_node()
         self.current_subtree_root = self.current_node
 
@@ -45,7 +49,6 @@ class GraphTraversalEnv(gym.Env):
             'edge_index': spaces.Tuple((spaces.Discrete(len(self.graph.nodes())), spaces.Discrete(len(self.graph.nodes()))))
         })
 
-        self.prev_dist = 8
         #self.curr_dist = self._get_dist_to_target()
 
 
@@ -53,6 +56,13 @@ class GraphTraversalEnv(gym.Env):
     def load_model(self):
         self.subgraph_detection_model = torch.load(self.subgraph_detection_model_path)
 
+    def sort_promosing_nodes(self):
+        #return a sorted list of promising nodes based on the number of children
+        promising_nodes = [node for node in self.promising_nodes.nodes() if len(list(self.promising_nodes.predecessors(node))) == 0]
+        children_count = [len(list(self.promising_nodes.successors(node))) for node in promising_nodes]
+        sorted_nodes = [node for _, node in sorted(zip(children_count, promising_nodes), reverse=True)]
+        return sorted_nodes
+    
 
     def graph_to_data(self, graph):
         # Get a mapping from old node indices to new ones
@@ -104,6 +114,7 @@ class GraphTraversalEnv(gym.Env):
         with torch.no_grad():
             for subgraph, data in zip(subgraphs, subgraphs_data):
                 score = model(data)
+                print(score)
                 if score > best_score:
                     best_score = score
                     best_graph = subgraph
@@ -112,6 +123,20 @@ class GraphTraversalEnv(gym.Env):
 
 
     def get_random_promising_node(self):
+
+        """
+        # Compute betweenness centrality for all nodes in the graph
+        centrality = self.centrality
+
+        #return the a node based on probability distribution based on the centrality score
+        nodes = list(centrality.keys())
+        centrality_scores = list(centrality.values())
+        centrality_scores = [score/sum(centrality_scores) for score in centrality_scores]
+        return np.random.choice(nodes, p=centrality_scores)
+        """
+        
+
+
         #get the node with no parents from the subgraph with the highest score
         #weight based on the number of children
 
@@ -171,10 +196,19 @@ class GraphTraversalEnv(gym.Env):
 
 
 
+    def skip_to_next_root(self):
+        self.current_node_iterator = (self.current_node_iterator + 1) % len(self.sorted_promising_nodes)
+
+
+    def _get_next_subgraph_root_node(self):
+        node_to_return = self.sorted_promising_nodes[self.current_node_iterator]
+        return node_to_return
+
     def _sample_start_node(self):
 
-        
-        return self.get_random_promising_node()
+        return self._get_next_subgraph_root_node()
+
+
 
     def _update_action_space(self):
         # Number of neighbors
@@ -198,10 +232,11 @@ class GraphTraversalEnv(gym.Env):
 
 
     def get_next_root_neighbour(self):
+        #ge the next root neighbour to iterate
         node_neighbors = list(self.graph.neighbors("root"))
         return node_neighbors[(node_neighbors.index(self.current_node) + 1) % len(node_neighbors)]
 
-    
+
     def is_target_in_subtree(self):
         return nx.has_path(self.graph, self.current_node, self.target_node)
 
@@ -286,7 +321,7 @@ class GraphTraversalEnv(gym.Env):
             if has_found_target:
                 return self._get_obs(), w_global*r_global + w_efficiency*r_efficiency + w_newly_visited*r_newly_visited, True, {'found_target': True}
         
-        self.current_node = self.current_subtree_root
+        #self.current_node = self.current_subtree_root
         self._update_action_space()
         #print(is_done)
         return self._get_obs(), w_global*r_global + w_efficiency*r_efficiency + w_newly_visited*r_newly_visited, False, {'found_target': False}
@@ -327,8 +362,17 @@ class GraphTraversalEnv(gym.Env):
         except nx.NetworkXNoPath:
             is_target_reachable = False
 
+        if action == self.action_space.n :
+            self.skip_to_next_root()
+            self._sample_start_node()
+            #self.current_subtree_root = self.current_node
+            self.visited_stack.append(self.current_node)
+            self._update_action_space()
+
+            return self._get_obs(), 0, False, {'found_target': False}
+
         if action >= len(neighbors) or not is_target_reachable:
-            return self._get_obs(), 0, True, {'found_target': False}
+            return self._get_obs(), -1, True, {'found_target': False}
 
         # Calculate previous distance before executing action
         previous_dist = self._get_dist_to_target()
@@ -386,7 +430,7 @@ class GraphTraversalEnv(gym.Env):
             self.graph.nodes[node].update({'visited': 0})
     def reset(self):
         self.episode_index += 1
-
+        self.current_node_iterator = 0
         self.current_node = self._sample_start_node()
         self.current_subtree_root = self.current_node
         self.visited_stack = []
