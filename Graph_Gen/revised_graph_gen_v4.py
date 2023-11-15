@@ -58,7 +58,7 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                 pointer_count += 1
                 if is_valid_pointer(potential_pointer, heap_start, raw_data):
                     last_valid_pointer_offset = i/chunk_size
-                    if first_valid_pointer_offset is None:
+                    if first_valid_pointer_offset == -1:
                         first_valid_pointer_offset = i/chunk_size
 
 
@@ -66,7 +66,7 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                     valid_pointer_count += 1
                 else:
                     last_pointer_offset = i/chunk_size
-                    if first_pointer_offset is None:
+                    if first_pointer_offset == -1:
                         first_pointer_offset = i/chunk_size
                     invalid_pointer_count += 1
 
@@ -87,8 +87,13 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                    first_valid_pointer_offset=first_valid_pointer_offset,
                    last_valid_pointer_offset=last_valid_pointer_offset)
 
-    if hex(source)[2:] in str(json_data["KEY_C_ADDR"]) or hex(source)[2:] in str(json_data["KEY_D_ADDR"]):
-        graph.nodes[source].update({'label': "KEY", 'cat': 1})
+    cat_counter = 0
+    for key, value in json_data.items():
+        #check if key match regex "KEY_*_ADDR"
+        is_key_attribute = re.match(r"KEY_[0-9a-zA-Z]*_ADDR", key)
+        if is_key_attribute and hex(source)[2:] in str(value):
+            cat_counter += 1
+            graph.nodes[source].update({'label': key, 'cat': cat_counter})
 
     if hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]):
         graph.nodes[source].update({'label': "SSH_STRUCT_ADDR"})
