@@ -8,21 +8,47 @@ from torch_geometric.data import Data
 import torch_geometric.transforms as T
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
+import concurrent.futures
+from numba import jit
 
-
+@jit(nopython=True)
+def compute_reward(previous_dist, current_dist, has_found_target, visit_count, 
+                TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
+                PROXIMITY_BONUS, NEW_NODE_BONUS, NO_PATH_PENALTY, 
+                ADDITIONAL_TARGET_MULTIPLIER, visited_keys_count):
+    if has_found_target:
+        target_reward = TARGET_FOUND_REWARD * (ADDITIONAL_TARGET_MULTIPLIER ** visited_keys_count)
+        return target_reward
+    if current_dist is None:
+        return NO_PATH_PENALTY
+    distance_reward = PROXIMITY_BONUS if current_dist < previous_dist else 0
+    revisit_penalty = REVISIT_PENALTY * visit_count if visit_count > 0 else 0
+    new_node_bonus = NEW_NODE_BONUS if visit_count == 0 else 0
+    total_reward = distance_reward + STEP_PENALTY + revisit_penalty + new_node_bonus
+    return total_reward
 
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes, level = 0, subgraph_detection_model_path = "models/model.pt", max_episode_steps=50):
+    def __init__(self, graph, target_nodes, subgraph_detection_model_path = "models/model.pt", max_episode_steps=30):
         super(GraphTraversalEnv, self).__init__()
 
         if not isinstance(graph, nx.Graph):
             raise ValueError("Graph should be a NetworkX graph.")
 
-        self.level = level
         self.graph = graph
         self.target_nodes = target_nodes
         self.episode_index = 0
         self.max_episode_steps = max_episode_steps
+        self.shortest_path_cache = {}
+
+        # Define reward and penalty constants
+        self.TARGET_FOUND_REWARD = 50
+        self.STEP_PENALTY = -1
+        self.REVISIT_PENALTY = -1
+        self.PROXIMITY_BONUS = 6
+        self.NEW_NODE_BONUS = 10
+        self.NO_PATH_PENALTY = -10
+        self.ADDITIONAL_TARGET_MULTIPLIER = 1.5
+
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -33,9 +59,17 @@ class GraphTraversalEnv(gym.Env):
         self.visited_stack = []
 
         self.promising_nodes = self._get_most_promising_subgraph()
+        self.graph = self.promising_nodes
 
+        """
+        #print the minimum, average and maximum number of children
+        print(f"Min children : {min([self.promising_nodes.out_degree(node) for node in self.promising_nodes.nodes()])}")
+        print(f"Average children : {np.mean([self.promising_nodes.out_degree(node) for node in self.promising_nodes.nodes()])}")
+        print(f"Max children : {max([self.promising_nodes.out_degree(node) for node in self.promising_nodes.nodes()])}")
+         
+        """
 
-        self.sorted_promising_nodes = self.sort_promosing_nodes()
+        self.sorted_promising_nodes = self.sort_promising_nodes()
         self.current_node_iterator = 0
         #self.centrality = nx.betweenness_centrality(self.graph)
 
@@ -63,21 +97,26 @@ class GraphTraversalEnv(gym.Env):
 
 
     def get_closest_target(self):
-        # Get the closest reachable target node from the current node
         closest_target = None
         closest_target_dist = float('inf')
+        minimum_dist = 0
+        nb_reachable_targets = 0
         for target in [t for t in self.target_nodes if t not in self.visited_keys]:
-            try:
-                path = nx.shortest_path(self.promising_nodes, self.current_node, target)
-                if len(path) < closest_target_dist:
-                    closest_target_dist = len(path)
-                    closest_target = target
-            except nx.NetworkXNoPath:
-
-                continue
-
+            if (self.current_node, target) not in self.shortest_path_cache:
+                try:
+                    path = nx.shortest_path(self.promising_nodes, self.current_node, target)
+                    self.shortest_path_cache[(self.current_node, target)] = path
+                    minimum_dist += len(path)
+                    nb_reachable_targets += 1
+                except nx.NetworkXNoPath:
+                    continue
+            path = self.shortest_path_cache[(self.current_node, target)]
+            if len(path) < closest_target_dist:
+                closest_target_dist = len(path)
+                closest_target = target
 
         return closest_target
+
 
     def update_target(self):
         #update the target node to the closest target node
@@ -85,14 +124,16 @@ class GraphTraversalEnv(gym.Env):
 
 
     def load_model(self):
-        self.subgraph_detection_model = torch.load(self.subgraph_detection_model_path)
+        if not hasattr(self, 'subgraph_detection_model'):
+            self.subgraph_detection_model = torch.load(self.subgraph_detection_model_path)
 
-    def sort_promosing_nodes(self):
-        #return a sorted list of promising nodes based on the number of children
-        promising_nodes = [node for node in self.promising_nodes.nodes() if len(list(self.promising_nodes.predecessors(node))) == 0]
-        children_count = [len(list(self.promising_nodes.successors(node))) for node in promising_nodes]
-        sorted_nodes = [node for _, node in sorted(zip(children_count, promising_nodes), reverse=True)]
-        return sorted_nodes
+
+    def sort_promising_nodes(self):
+        promising_nodes = np.array([node for node in self.promising_nodes.nodes() if self.promising_nodes.in_degree(node) == 0])
+        children_count = np.array([self.promising_nodes.out_degree(node) for node in promising_nodes])
+        sorted_indices = np.argsort(children_count)[::-1]
+        return promising_nodes[sorted_indices].tolist()
+
     
 
     def graph_to_data(self, graph):
@@ -119,10 +160,11 @@ class GraphTraversalEnv(gym.Env):
         return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y).to(self.device)
     
     def create_subgraph_data(self):
-
-        #get all subgraphs
         subgraphs = [self.graph.subgraph(c) for c in nx.connected_components(self.graph.to_undirected())]
-        subgraphs_data = [self.graph_to_data(g) for g in subgraphs]
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            subgraphs_data = list(executor.map(self.graph_to_data, subgraphs))
+
         return subgraphs, subgraphs_data
 
 
@@ -145,7 +187,6 @@ class GraphTraversalEnv(gym.Env):
         with torch.no_grad():
             for subgraph, data in zip(subgraphs, subgraphs_data):
                 score = model(data)
-                print(score)
                 if score > best_score:
                     best_score = score
                     best_graph = subgraph
@@ -194,19 +235,6 @@ class GraphTraversalEnv(gym.Env):
 
         return 0
     
-    def get_start_from_level(self):
-        #get a random parent node of node 0, if level is 0 then select from direct parents, if level is 1 then select from grand parents and so on
-        node_parents = list(self.graph.predecessors(0))
-        if self.level == 0:
-            print(len(node_parents))
-            random_parent = random.choice(node_parents)
-            print(random_parent)
-            return random.choice(node_parents)
-        else :
-            for i in range(self.level):
-                node_parents = [node for node in node_parents if len(list(self.graph.predecessors(node))) > 0]
-                node_parents = [random.choice(list(self.graph.predecessors(node))) for node in node_parents]
-            return random.choice(node_parents)
         
     def get_neighbour_from_root(self):
         #return the episode_index-th neighbour of node 0 modulo the number of neighbours
@@ -237,7 +265,8 @@ class GraphTraversalEnv(gym.Env):
         # Number of neighbors
         #TODO : Add + 1 for Backtrack
         
-        num_actions = len(list(self.graph.neighbors(self.current_node)))
+        num_actions = 50#len(list(self.graph.neighbors(self.current_node)))
+
         self.action_space = spaces.Discrete(num_actions)
         
 
@@ -262,37 +291,6 @@ class GraphTraversalEnv(gym.Env):
         return nx.has_path(self.graph, self.current_node, self.target_node)
 
 
-    def compute_reward(self, previous_dist, current_dist, has_found_target, visit_count):
-        TARGET_FOUND_REWARD = 50
-        STEP_PENALTY = -1
-        REVISIT_PENALTY = -5
-        PROXIMITY_BONUS = 6
-        NEW_NODE_BONUS = 10
-        NO_PATH_PENALTY = -10
-        ADDITIONAL_TARGET_MULTIPLIER = 1.5  # Multiplier for each additional target found
-
-        # Reward for finding a target
-        if has_found_target:
-            target_reward = TARGET_FOUND_REWARD * (ADDITIONAL_TARGET_MULTIPLIER ** len(self.visited_keys))
-            return target_reward
-
-        # Penalty for no path to the target
-        if current_dist is None:
-            return NO_PATH_PENALTY
-
-        # Reward for moving closer to the target
-        distance_reward = PROXIMITY_BONUS if current_dist < previous_dist else 0
-
-        # Penalty for revisiting nodes (scaled by visit count)
-        revisit_penalty = REVISIT_PENALTY * visit_count if visit_count > 0 else 0
-
-        # Bonus for visiting a new node
-        new_node_bonus = NEW_NODE_BONUS if visit_count == 0 else 0
-
-        # Aggregate and return the total reward
-        total_reward = distance_reward + STEP_PENALTY + revisit_penalty + new_node_bonus
-        return total_reward
-
 
     def restart_agent_from_root(self):
         self.current_node = self._sample_start_node()
@@ -300,11 +298,47 @@ class GraphTraversalEnv(gym.Env):
         self.increment_visited(self.current_node)
         self._update_action_space()
 
+
+    def get_valid_actions(self):
+        #valid actions are the neighbours of the current node + the skip action (the last action = 48)
+        neighbors = list(self.graph.neighbors(self.current_node))
+        valid_actions = [i for i in range(len(neighbors))] + [49]
+
+
+        return valid_actions
+
+
+    def get_action_mask(self):
+        # Example implementation, customize based on your environment's logic
+        valid_actions = self.get_valid_actions()  # You need to implement this
+        action_mask = -1e6 * np.ones(self.action_space.n)
+        action_mask[valid_actions] = 0
+        return action_mask
+
+
     def step(self, action, printing=False):
 
         if self.nb_actions_taken > self.max_episode_steps:
-            return self._get_obs(), -1, True, {'found_target': False,
+            return self._get_obs(), -1, True, {'found_target': True,
                                                'max_episode_steps_reached': True,
+                          
+                             'nb_keys_found': len(self.visited_keys)}
+
+        if action == self.action_space.n - 1: #skip to the next subtree
+
+            #this is the stop action, meaning the agent think found all the keys
+            if len(self.visited_keys) == self.nb_targets:
+                return self._get_obs(), 100, True, {'found_target': False,
+                                               'nb_keys_found': len(self.visited_keys)}
+            else :
+                return self._get_obs(), -1, True, {'found_target': False, 'nb_keys_found': len(self.visited_keys)}
+
+
+            self.skip_to_next_root()
+            self.restart_agent_from_root()
+
+
+            return self._get_obs(), 0, False, {'found_target': False,
                                                'nb_keys_found': len(self.visited_keys)}
 
         self.nb_actions_taken += 1
@@ -324,16 +358,10 @@ class GraphTraversalEnv(gym.Env):
         except nx.NetworkXNoPath:
             is_target_reachable = False
 
-        if action == self.action_space.n : #skip to the next subtree
-            self.skip_to_next_root()
-            self.restart_agent_from_root()
 
-
-            return self._get_obs(), 0, False, {'found_target': False,
-                                               'nb_keys_found': len(self.visited_keys)}
     
 
-        if action >= len(neighbors) or not is_target_reachable:
+        if not is_target_reachable:
             self.restart_agent_from_root()
 
             return self._get_obs(), -1, False, {'found_target': False,
@@ -358,12 +386,15 @@ class GraphTraversalEnv(gym.Env):
 
         # Compute the reward
         visit_count = self.graph.nodes[self.current_node]['visited']
-        reward = self.compute_reward(previous_dist, current_dist, has_found_target, visit_count)        
+        reward = compute_reward(previous_dist, current_dist, has_found_target, visit_count, 
+                                     self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY, 
+                                     self.PROXIMITY_BONUS, self.NEW_NODE_BONUS, self.NO_PATH_PENALTY, 
+                                     self.ADDITIONAL_TARGET_MULTIPLIER, len(self.visited_keys)) 
         
 
         if has_found_target:
             self.visited_keys.append(self.current_node)
-            is_done = len(self.visited_keys) == self.nb_targets
+            is_done = False #len(self.visited_keys) == self.nb_targets
 
             if not is_done:
                 self.restart_agent_from_root()
@@ -394,6 +425,8 @@ class GraphTraversalEnv(gym.Env):
     def reset_visited(self):
         for node in self.graph.nodes():
             self.graph.nodes[node].update({'visited': 0})
+        
+        
     def reset(self):
         self.episode_index += 1
         self.current_node_iterator = 0
@@ -404,65 +437,51 @@ class GraphTraversalEnv(gym.Env):
         self.reset_visited()
         self.visited_keys = []
         self.nb_actions_taken = 0
+        #self.shortest_path_cache = {}
         return self._get_obs()
+
 
     def _get_obs(self):
         # Current node and its successors
         nodes = [self.current_node] + list(self.graph.neighbors(self.current_node))
 
-        # Extract node attributes. Assuming all nodes have the same attributes. remove the 'cat' feature
-        
-        subgraph = self.graph.subgraph(nodes)
+        # Extract node attributes in a vectorized way using list comprehensions
+        attributes = np.array([[data['struct_size'],
+                                data['valid_pointer_count'],
+                                data['invalid_pointer_count'],
+                                data['visited'],
+                                data['first_pointer_offset'],
+                                data['last_pointer_offset'],
+                                data['first_valid_pointer_offset'],
+                                data['last_valid_pointer_offset'],
+                                1 if self.graph.out_degree(node) > 0 else 0,
+                                self.graph[self.current_node][node]['offset'] if node in self.graph[self.current_node] else 0,
+                                len(self.visited_keys)
+                                ] for node, data in self.graph.subgraph(nodes).nodes(data=True)], dtype=np.float32)
 
-        #Sinusoidal positional encoding
-        #pos_enc = torch.zeros((len(nodes), 2))
-        #pos_enc[:, 0] = torch.sin(torch.arange(0, len(nodes), 1) * (2 * np.pi / len(nodes)))
-        #pos_enc[:, 1] = torch.cos(torch.arange(0, len(nodes), 1) * (2 * np.pi / len(nodes)))
-         
+        # Convert attributes to a PyTorch tensor
+        x = torch.from_numpy(attributes)
 
-        
-
-        x = torch.tensor([[
-            data['struct_size'],
-            data['valid_pointer_count'],
-            data['invalid_pointer_count'],
-            data['visited'],
-            data['first_pointer_offset'],
-            data['last_pointer_offset'],
-            data['first_valid_pointer_offset'],
-            data['last_valid_pointer_offset'],
-            1 if self.graph.out_degree(node) > 0 else 0,
-            #get edge atribute offset from current node to target node
-            subgraph[self.current_node][node]['offset'] if node in subgraph[self.current_node] else 0,
-            len(self.visited_keys)
-            
-        ] for node, data in subgraph.nodes(data=True)], dtype=torch.float)
-
-        #x = torch.cat((x, pos_enc), dim=1)
         # Build edge index for the subgraph
-        edge_list = [(self.current_node, neighbor) for neighbor in self.graph.neighbors(self.current_node)]
         edge_index = [[], []]
-        edge_attributes = []
-
-        for edge in edge_list:
-            src = nodes.index(edge[0])
-            dst = nodes.index(edge[1])
-            edge_index[0].append(src)
-            edge_index[1].append(dst)
-
+        for neighbor in self.graph.neighbors(self.current_node):
+            edge_index[0].append(nodes.index(self.current_node))
+            edge_index[1].append(nodes.index(neighbor))
 
         edge_index = torch.tensor(edge_index, dtype=torch.long)
 
-        #check if the shape of x is equal to self.state_size
+        # Check if the shape of x matches self.state_size
         if x.shape[1] != self.state_size:
-            raise ValueError("The shape of x is not equal to self.state_size, x.shape[1] = " + str(x.shape[1]) + " self.state_size = " + str(self.state_size) )
-         
+            raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
 
-        data = Data(x = x, edge_index= edge_index)
+        # Create PyTorch Geometric data
+        data = Data(x=x, edge_index=edge_index)
+
+        # Apply transform to convert data to undirected, if necessary
         data = T.ToUndirected()(data)
 
-
         return data
+
 
 
 

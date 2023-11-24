@@ -89,11 +89,16 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
 
     cat_counter = 0
     for key, value in json_data.items():
-        #check if key match regex "KEY_*_ADDR"
-        is_key_attribute = re.match(r"KEY_[0-9a-zA-Z]*_ADDR", key)
-        if is_key_attribute and hex(source)[2:] in str(value):
-            cat_counter += 1
-            graph.nodes[source].update({'label': key, 'cat': cat_counter})
+        # Check if key matches regex "KEY_*_ADDR"
+        match = re.match(r"KEY_([0-9a-zA-Z]*)_ADDR", key)
+        if match:
+            letter = match.group(1)
+            key_attribute = f"KEY_{letter}"
+            # Check if the corresponding KEY_* exists and is not empty
+            if key_attribute in json_data and json_data[key_attribute]:
+                if hex(source)[2:] in str(value):
+                    cat_counter += 1
+                    graph.nodes[source].update({'label': key, 'cat': cat_counter})
 
     if hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]):
         graph.nodes[source].update({'label': "SSH_STRUCT_ADDR"})

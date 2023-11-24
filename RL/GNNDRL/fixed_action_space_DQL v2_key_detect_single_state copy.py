@@ -136,13 +136,14 @@ UPDATE_EVERY = 4        # how often to update the network
 # MODEL DEFINITION
 # -------------------------
 class QNetwork(torch.nn.Module):
-    def __init__(self, node_feature_size, action_size, seed):
+    def __init__(self, node_feature_size, action_size, seed, dropout_rate=0.2):
         super(QNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
 
-
         self.fc1 = torch.nn.Linear(node_feature_size, 128)
+        self.dropout1 = torch.nn.Dropout(p=dropout_rate)
         self.fc2 = torch.nn.Linear(128, 128)
+        self.dropout2 = torch.nn.Dropout(p=dropout_rate)
 
         # Dueling DQN
         self.value_stream = torch.nn.Linear(128, 128)
@@ -151,20 +152,24 @@ class QNetwork(torch.nn.Module):
         self.advantage_stream = torch.nn.Linear(128, 128)
         self.advantage = torch.nn.Linear(128, action_size)
 
-
-    def forward(self, state):
+    def forward(self, state, action_mask):
         x = F.relu(self.fc1(state))
+        x = self.dropout1(x)
         x = F.relu(self.fc2(x))
-        
+        x = self.dropout2(x)
+
         value = F.relu(self.value_stream(x))
         value = self.value(value)
-        
+
         advantage = F.relu(self.advantage_stream(x))
         advantage = self.advantage(advantage)
-        
-        # Combine value and advantage streams
-        qvals = value + (advantage - advantage.mean())
-        return qvals
+
+        qvals = value + (advantage - advantage.mean(dim=1, keepdim=True))
+
+        # Apply the action mask: set the value of masked actions to a large negative number
+        masked_qvals = qvals + action_mask
+
+        return masked_qvals
 
 
 class MetaController(torch.nn.Module):
@@ -191,7 +196,7 @@ class MetaController(torch.nn.Module):
 # AGENT DEFINITION
 # -------------------------
 class Agent:
-    def __init__(self, state_size, action_size, seed):
+    def __init__(self, state_size, action_size, seed, weight_decay=1e-5):
         self.state_size = state_size
         self.action_size = action_size
         self.seed = random.seed(seed)
@@ -203,13 +208,12 @@ class Agent:
 
         # Replay memory
         self.memory = deque(maxlen=BUFFER_SIZE)
-        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-
+        self.experience = namedtuple("experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask"])
         self.t_step = 0
 
-    def step(self, state, action, reward, next_state, done):
+    def step(self, state, action, reward, next_state, done, action_mask):
         # Save experience in replay memory
-        e = self.experience(state, action, reward, next_state, done)
+        e = self.experience(state, action, reward, next_state, done, action_mask)
         self.memory.append(e)
 
         # Learn every UPDATE_EVERY time steps.
@@ -219,32 +223,32 @@ class Agent:
                 experiences = self.sample()
                 self.learn(experiences, GAMMA)
 
-    def act(self, state, eps=0.):
-        
-        state = state.float().unsqueeze(0).to(device)
-        self.qnetwork_local.eval()
-        with torch.no_grad():
-            action_values = self.qnetwork_local(state)
-        self.qnetwork_local.train()
+    def act(self, state, action_mask, eps=0.):
+            state = state.float().unsqueeze(0).to(device)
+            action_mask = torch.tensor(action_mask).to(device)
+            self.qnetwork_local.eval()
+            with torch.no_grad():
+                action_values = self.qnetwork_local(state, action_mask)
+            self.qnetwork_local.train()
 
-        # Epsilon-greedy action selection
-        if random.random() > eps:
-            return np.argmax(action_values.cpu().data.numpy())
-        else:
-            return random.choice(np.arange(self.action_size))
+            # Epsilon-greedy action selection
+            if random.random() > eps:
+                return np.argmax(action_values.cpu().data.numpy())
+            else:
+
+                return random.choice(np.where(action_mask.cpu() == 0)[0])  # Select from valid actions only
 
     def learn(self, experiences, gamma):
-        states, actions, rewards, next_states, dones = experiences
-
+        states, actions, rewards, next_states, dones, next_state_masks = experiences
         # DDQN
-        indices = self.qnetwork_local(next_states).detach().argmax(1).unsqueeze(1)
-        Q_targets_next = self.qnetwork_target(next_states).detach().gather(1, indices)
+        indices = self.qnetwork_local(next_states, next_state_masks).detach().argmax(1).unsqueeze(1)
+        Q_targets_next = self.qnetwork_target(next_states, next_state_masks).detach().gather(1, indices)
 
         # Compute Q targets for current states
         Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
 
         # Get expected Q values from local model
-        Q_expected = self.qnetwork_local(states).gather(1, actions)
+        Q_expected = self.qnetwork_local(states, next_state_masks).gather(1, actions)
 
         # Compute loss
         loss = F.mse_loss(Q_expected, Q_targets)
@@ -256,19 +260,22 @@ class Agent:
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
 
     def soft_update(self, local_model, target_model, tau):
-        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
-            target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
+        for target_param, local_param in zip(self.qnetwork_target.parameters(), self.qnetwork_local.parameters()):
+            target_param.data.mul_(1.0 - tau)
+            target_param.data.add_(tau * local_param.data)
 
     def sample(self):
         experiences = random.sample(self.memory, k=BATCH_SIZE)
 
+        # Extract experiences and action masks
         states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
         rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
         next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
         dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
+        action_masks = torch.from_numpy(np.vstack([e.action_mask for e in experiences if e is not None])).float().to(device)
 
-        return (states, actions, rewards, next_states, dones)
+        return (states, actions, rewards, next_states, dones, action_masks)
 
 
 
@@ -289,7 +296,7 @@ meta_controller = MetaController(STATE_SPACE, META_HIDDEN_DIM, META_OUTPUT_DIM).
 
 
 INIT_EPS = 0.8
-EPS_DECAY = 0.999
+EPS_DECAY = 0.98
 
 
 def check_parameters(env):
@@ -301,7 +308,7 @@ def check_parameters(env):
     
     
 
-def execute_for_graph(file, training = True, level = 0):
+def execute_for_graph(file, training = True):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
 
@@ -310,9 +317,9 @@ def execute_for_graph(file, training = True, level = 0):
     
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, level)
+    env = GraphTraversalEnv(graph, target_nodes)
     windowed_success = 0
-    num_episodes = 3000
+    num_episodes = 200
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -500
@@ -327,11 +334,13 @@ def execute_for_graph(file, training = True, level = 0):
 
         while True:
             first_node = observation.x[0]
-            action = agent.act(first_node, eps)
+            action_mask = env.get_action_mask()
+
+            action = agent.act(first_node,action_mask, eps)
             new_observation, reward, done, info = env.step(action, False)
             episode_reward += reward
             if training:
-                agent.step(first_node, action, reward, new_observation.x[0], done)
+                agent.step(first_node, action, reward, new_observation.x[0], done, action_mask)
 
             episode_stats["nb_of_moves"] += 1
             
@@ -370,23 +379,26 @@ def visualize(rewards):
     plt.show()
 
 
-#take random files from folder and execute
-nb_random_files = 6
 
-max_levels = 4
-for level in range( max_levels):
+check_parameters()
+
+#take random files from folder and execute
+nb_random_files = 13
+
+nb_try = 4
+for curr_try in range( nb_try):
     random_files = random.sample(os.listdir(FOLDER), nb_random_files)
     i = 0
     for file in random_files:
         if file.endswith(".graphml"):
             i+=1
             print(f"[{i} / {nb_random_files}] : Executing Training for {file}")
-            execute_for_graph(FOLDER + file, True, level)
+            execute_for_graph(FOLDER + file, True)
     
     #take random file from folder and execute
     random_file = random.choice(os.listdir(FOLDER))
     print(f"Executing Testing for {random_file}")
-    rewards, succes_rate = execute_for_graph(FOLDER + random_file, False, level)
+    rewards, succes_rate = execute_for_graph(FOLDER + random_file, False)
     print(f"Success rate : {succes_rate}")
 
 #take random file from folder and execute
