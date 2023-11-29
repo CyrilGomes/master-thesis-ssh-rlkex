@@ -295,8 +295,8 @@ agent = Agent(STATE_SPACE, ACTION_SPACE, seed=0)
 meta_controller = MetaController(STATE_SPACE, META_HIDDEN_DIM, META_OUTPUT_DIM).to(device)
 
 
-INIT_EPS = 0.8
-EPS_DECAY = 0.98
+INIT_EPS = 0.9
+EPS_DECAY = 0.992
 
 
 def check_parameters(env):
@@ -318,8 +318,10 @@ def execute_for_graph(file, training = True):
     episode_rewards = []
     #data = graph_to_data(graph)
     env = GraphTraversalEnv(graph, target_nodes)
+
+    check_parameters(env)
     windowed_success = 0
-    num_episodes = 200
+    num_episodes = 500
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -500
@@ -334,10 +336,10 @@ def execute_for_graph(file, training = True):
 
         while True:
             first_node = observation.x[0]
-            action_mask = env.get_action_mask()
+            action_mask = env._get_action_mask()
 
             action = agent.act(first_node,action_mask, eps)
-            new_observation, reward, done, info = env.step(action, False)
+            new_observation, reward, done, info = env.step(action)
             episode_reward += reward
             if training:
                 agent.step(first_node, action, reward, new_observation.x[0], done, action_mask)
@@ -380,7 +382,6 @@ def visualize(rewards):
 
 
 
-check_parameters()
 
 #take random files from folder and execute
 nb_random_files = 13
@@ -404,7 +405,7 @@ for curr_try in range( nb_try):
 #take random file from folder and execute
 random_file = random.choice(os.listdir(FOLDER))
 print(f"Executing Testing for {random_file}")
-rewards, succes_rate = execute_for_graph(FOLDER + random_file, False, 0)
+rewards, succes_rate = execute_for_graph(FOLDER + random_file, False)
 print(f"Success rate : {succes_rate}")
 visualize(rewards)
 
