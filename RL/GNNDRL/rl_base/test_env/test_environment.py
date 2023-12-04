@@ -6,37 +6,18 @@ import torch
 import random 
 from torch_geometric.data import Data
 import torch_geometric.transforms as T
+import torch.nn.functional as F
+
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv, global_mean_pool
+from torch_geometric.nn import SAGEConv, global_mean_pool, GCNConv
 import concurrent.futures
 from numba import jit
+from gnn import GNN
 
-@jit(nopython=True)
-def compute_reward(previous_dist, current_dist, has_found_target, visit_count, 
-                   TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
-                   PROXIMITY_BONUS, NEW_NODE_BONUS, NO_PATH_PENALTY, 
-                   ADDITIONAL_TARGET_MULTIPLIER, visited_keys_count, 
-                   max_episode_steps, nb_actions_taken, true_keys_count):
-    
-    if nb_actions_taken > max_episode_steps:
-        # Logic for final reward when max episode steps are reached
-        return -1 * (visited_keys_count - true_keys_count)
-    if has_found_target:
-        target_reward =  TARGET_FOUND_REWARD * (ADDITIONAL_TARGET_MULTIPLIER ** true_keys_count) 
 
-        return target_reward
-    if current_dist is None:
-        return NO_PATH_PENALTY
-    distance_reward = PROXIMITY_BONUS * (previous_dist - current_dist) if current_dist < previous_dist else 0
-    revisit_penalty = REVISIT_PENALTY * visit_count if visit_count > 1 else 0
-    new_node_bonus = NEW_NODE_BONUS if visit_count == 0 else 0
-    
-    total_reward = distance_reward + STEP_PENALTY + revisit_penalty + new_node_bonus
-    #print(f"Distance reward: {distance_reward}, Step penalty: {STEP_PENALTY}, Revisit penalty: {revisit_penalty}, New node bonus: {new_node_bonus}")
-    return total_reward
 
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes, subgraph_detection_model_path="models/model.pt", max_episode_steps=30):
+    def __init__(self, graph, subgraph_detection_model_path="models/model.pt", max_episode_steps=30):
         """
         Initializes the Graph Traversal Environment.
 
@@ -50,12 +31,8 @@ class GraphTraversalEnv(gym.Env):
 
         self._validate_graph(graph)
         self.graph = graph
-        self.target_nodes = target_nodes
-        self.episode_index = 0
         self.max_episode_steps = max_episode_steps
-        self.shortest_path_cache = {}
 
-        self._init_rewards_and_penalties()
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.subgraph_detection_model_path = subgraph_detection_model_path
         self.subgraph_detection_model = self._load_model()
@@ -74,68 +51,21 @@ class GraphTraversalEnv(gym.Env):
 
         self.observation_space = self._define_observation_space()
         self.visited_keys = []
-        self.nb_targets = len(self.target_nodes)
         self.nb_actions_taken = 0
 
     def _validate_graph(self, graph):
         if not isinstance(graph, nx.Graph):
             raise ValueError("Graph should be a NetworkX graph.")
 
-    def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 6
-        self.STEP_PENALTY = -1
-        self.REVISIT_PENALTY = -1
-        self.PROXIMITY_BONUS = 3
-        self.NEW_NODE_BONUS = 2
-        self.NO_PATH_PENALTY = -6
-        self.ADDITIONAL_TARGET_MULTIPLIER = 1.2
-
-
-    def _get_closest_target(self):
-        """
-        Finds the closest target node to the current node.
-
-        Returns:
-            Node: The closest target node.
-        """
-        closest_target, closest_target_dist = None, float('inf')
-        for target in [t for t in self.target_nodes if t not in self.visited_keys]:
-            path_length = self._get_path_length(self.current_node, target)
-            if path_length is not None and path_length < closest_target_dist:
-                closest_target_dist, closest_target = path_length, target
-        return closest_target
-
-    def _get_path_length(self, source, target):
-        """
-        Gets the length of the shortest path between two nodes.
-
-        Args:
-            source: The source node.
-            target: The target node.
-
-        Returns:
-            int or None: The length of the shortest path or None if no path exists.
-        """
-        if (source, target) not in self.shortest_path_cache:
-            try:
-                path = nx.shortest_path(self.promising_nodes, source, target)
-                self.shortest_path_cache[(source, target)] = len(path) - 1
-            except nx.NetworkXNoPath:
-                return None
-        return self.shortest_path_cache[(source, target)]
-    
-    def update_target(self):
-        """
-        Updates the target node to the closest target node.
-        """
-        self.target_node = self._get_closest_target()
-
-
     def _load_model(self):
         """
         Loads the subgraph detection model.
         """
-        return torch.load(self.subgraph_detection_model_path)
+        model = GNN()
+        model.load_state_dict(torch.load(self.subgraph_detection_model_path))
+        model.eval()  # Set the network to evaluation mode
+        model = model.to(self.device)
+        return model
     
     def _sort_promising_nodes(self):
         """
@@ -194,19 +124,6 @@ class GraphTraversalEnv(gym.Env):
         return subgraphs, subgraphs_data
 
 
-    def _get_dist_to_target(self):
-        """
-        Calculates the distance from the current node to the target node.
-
-        Returns:
-            int or None: Distance to the target node or None if no path exists.
-        """
-        # If no path exists, return None.
-        try:
-            path = nx.shortest_path(self.graph, self.current_node, self.target_node)
-            return len(path) - 1
-        except nx.NetworkXNoPath:
-            return None
 
 
     def _get_most_promising_subgraph(self):
@@ -322,19 +239,6 @@ class GraphTraversalEnv(gym.Env):
         action_mask[valid_actions] = 0
         return action_mask
     
-    def _get_true_keys_count(self):
-        """
-        Get the actual number of keys in self.visited_keys
-        Args:
-            None
-        Returns:
-            int: The actual number of keys in self.visited_keys
-        """
-        count = 0
-        for key in self.visited_keys:
-            if key in self.target_nodes:
-                count += 1
-        return count
 
 
     def step(self, action):
@@ -352,51 +256,14 @@ class GraphTraversalEnv(gym.Env):
         # Check if the action is to stop searching for more keys
         if action == self.action_space.n - 1:
             
-            nb_true_keys = self._get_true_keys_count()
-            # Special action for stopping the search
-            if len(self.visited_keys) == self.nb_targets and  self.nb_targets == nb_true_keys:
-                reward = 7 * len(self.visited_keys)
-                done = True
-                found_target = True
-            else:
-                reward = -6 * len(self.visited_keys) + nb_true_keys
-                done = True
-                found_target = False
-            return self._get_obs(), reward, done, {'found_target': found_target, 'nb_keys_found': len(self.visited_keys)}
+            return self._get_obs(), True, self._episode_info()
 
-        # Update the target node based on the current node
-        self.update_target()
-        if self.target_node is None:
-            #return to base node
-            self._restart_agent_from_root()
-            return self._get_obs(), -10, False, {'found_target': False,
-                                                'nb_keys_found': len(self.visited_keys)}
 
-        
         self.nb_actions_taken += 1
 
-        # Calculate distance to the target node before performing the action
-        previous_dist = self._get_dist_to_target()
 
         # Regular action: moving to another node
         self._perform_action(action)
-
-
-        # Calculate distance to the target node after performing the action
-        current_dist = self._get_dist_to_target() if self.current_node != self.target_node else 0
-
-        # Check if the current node is the target node
-        has_found_target = self.current_node == self.target_node
-
-        # Get the number of times the current node has been visited
-        visit_count = self.graph.nodes[self.current_node]['visited']
-
-        # Compute the reward based on the state before and after the action
-        reward = compute_reward(previous_dist, current_dist, has_found_target, visit_count,
-                                self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY,
-                                self.PROXIMITY_BONUS, self.NEW_NODE_BONUS, self.NO_PATH_PENALTY,
-                                self.ADDITIONAL_TARGET_MULTIPLIER, len(self.visited_keys),
-                                self.max_episode_steps, self.nb_actions_taken, self._get_true_keys_count())
 
         # Check if the episode is over
         done = self.nb_actions_taken > self.max_episode_steps
@@ -407,7 +274,7 @@ class GraphTraversalEnv(gym.Env):
             self._restart_agent_from_root()
 
         
-        return self._get_obs(), reward, done, self._episode_info()
+        return self._get_obs(), done, self._episode_info()
 
     
     def _is_episode_over(self):
@@ -419,26 +286,6 @@ class GraphTraversalEnv(gym.Env):
         """
         return self.nb_actions_taken > self.max_episode_steps
 
-    def _finalize_episode(self):
-        """
-        Finalizes the episode, providing the final observation and other details.
-
-        Returns:
-            tuple: Final observation, reward, done flag, and additional info.
-        """
-        reward = self._final_reward()
-        return self._get_obs(), reward, True, self._episode_info(found_target=len(self.visited_keys) == self.nb_targets)
-    
-    def _final_reward(self):
-        """
-        Calculates the final reward at the end of an episode.
-
-        Returns:
-            float: The final reward.
-        """
-        if len(self.visited_keys) == self.nb_targets:
-            return 100  # Example reward, adjust as needed
-        return -1
     
     def _perform_action(self, action):
         """
@@ -466,20 +313,19 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-    def _episode_info(self, found_target=False):
+    def _episode_info(self):
         """
         Constructs additional info about the current episode.
 
         Args:
-            found_target (bool): Flag indicating whether the target was found.
-
+            None
         Returns:
             dict: Additional info about the episode.
         """
         return {
-            'found_target': found_target,
             'max_episode_steps_reached': self._is_episode_over(),
-            'nb_keys_found': len(self.visited_keys)
+            'nb_keys_found': len(self.visited_keys),
+            'found_keys': self.visited_keys
         }
 
     def _increment_visited(self, node):
@@ -505,10 +351,8 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             Data: Initial observation data after resetting.
         """
-        self.episode_index += 1
         self.current_node_iterator = 0
         self.current_node = self._sample_start_node()
-        self.update_target()
         self.current_subtree_root = self.current_node
         self.visited_stack = []
         self._update_action_space()
@@ -533,7 +377,7 @@ class GraphTraversalEnv(gym.Env):
                                 data['last_valid_pointer_offset'],
                                 1 if self.graph.out_degree(node) > 0 else 0,
                                 self.graph[self.current_node][node]['offset'] if node in self.graph[self.current_node] else 0,
-                                self._get_true_keys_count()
+                                len(self.visited_keys)
                                 ] for node, data in self.graph.subgraph(nodes).nodes(data=True)], dtype=np.float32)
 
         # Convert attributes to a PyTorch tensor
@@ -558,25 +402,6 @@ class GraphTraversalEnv(gym.Env):
         data = T.ToUndirected()(data)
 
         return data
-
-    def _print_step_debug(self, neighbors, action, printing=False):
-        """
-        Prints debugging information for each step, if enabled.
-
-        Args:
-            neighbors (list): List of neighbors of the current node.
-            action (int): The action taken.
-            printing (bool): Flag to enable/disable printing.
-        """
-        if not printing:
-            return
-
-        if self.target_node not in neighbors:
-            best_path = nx.shortest_path(self.graph, self.current_node, self.target_node)
-            best_neighbor = best_path[1]
-            print(f"Current node: {self.current_node}, Distance to target: {len(best_path)}, Neighbors: {neighbors}, Target: {self.target_node}, Action: {action}, Best action: {best_neighbor}")
-        else:
-            print(f"Current node: {self.current_node}, Neighbors: {neighbors}, Target: {self.target_node}, Action: {action}, Best action: {self.target_node}")
 
     def _build_edge_index(self, nodes):
         """

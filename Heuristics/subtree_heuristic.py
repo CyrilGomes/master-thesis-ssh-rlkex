@@ -157,8 +157,7 @@ def export_model(model, path, loader):
     # Using torch_geometric.compile instead of torch.jit.trace
     #compiled_model = compile(model, dynamic=True, fullgraph=True)
 
-    torch.save(model, os.path.join(path, 'model.pt'))
-
+    torch.save(model.state_dict(), os.path.join(path, 'model_state_dict.pt'))
     
 class GNN(torch.nn.Module):
     def __init__(self, dimension=7):

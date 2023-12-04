@@ -32,6 +32,10 @@ import torch.nn.functional as F
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+import matplotlib.pyplot as plt
+
+plt.ion()  # Turn on interactive mode
+fig, ax = plt.subplots()  # Create a figure and axis object
 
 # -------------------------
 # GRAPH PROCESSING
@@ -171,27 +175,6 @@ class QNetwork(torch.nn.Module):
 
         return masked_qvals
 
-
-class MetaController(torch.nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(MetaController, self).__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.fc = torch.nn.Linear(hidden_dim, output_dim)
-        self.relu = torch.nn.ReLU()
-
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-
-        x = self.relu(self.conv1(x, edge_index))
-        x = self.relu(self.conv2(x, edge_index))
-
-        # Aggregate node features to get graph-level representation
-        x = torch.mean(x, dim=0)
-
-        return self.fc(x)
-    
-
 # -------------------------
 # AGENT DEFINITION
 # -------------------------
@@ -210,6 +193,8 @@ class Agent:
         self.memory = deque(maxlen=BUFFER_SIZE)
         self.experience = namedtuple("experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask"])
         self.t_step = 0
+
+        self.gradient_norms = []  # Add this line to store gradient norms
 
     def step(self, state, action, reward, next_state, done, action_mask):
         # Save experience in replay memory
@@ -254,10 +239,33 @@ class Agent:
         loss = F.mse_loss(Q_expected, Q_targets)
         self.optimizer.zero_grad()
         loss.backward()
+
+        # Monitoring gradients
+        # Compute and store average gradient norms
+        average_norm = 0
+        for name, param in self.qnetwork_local.named_parameters():
+            if param.grad is not None:
+                average_norm += param.grad.data.norm(2).item()
+        average_norm /= len(list(self.qnetwork_local.named_parameters()))
+        self.gradient_norms.append(average_norm)
+        
+
+        # Gradient clipping
+        clip_value = 1  # Start with this value or adjust based on your observations
+        torch.nn.utils.clip_grad_norm_(self.qnetwork_local.parameters(), clip_value)
+
         self.optimizer.step()
 
         # Soft update target network
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
+
+    def plot_gradient_norms(gradient_norms):
+        plt.plot(gradient_norms)
+        plt.title("Gradient Norms During Training")
+        plt.xlabel("Training Steps")
+        plt.ylabel("Average Gradient Norm")
+        plt.show()
+
 
     def soft_update(self, local_model, target_model, tau):
         for target_param, local_param in zip(self.qnetwork_target.parameters(), self.qnetwork_local.parameters()):
@@ -295,8 +303,8 @@ agent = Agent(STATE_SPACE, ACTION_SPACE, seed=0)
 meta_controller = MetaController(STATE_SPACE, META_HIDDEN_DIM, META_OUTPUT_DIM).to(device)
 
 
-INIT_EPS = 0.9
-EPS_DECAY = 0.992
+INIT_EPS = 0.95
+EPS_DECAY = 0.999
 
 
 def check_parameters(env):
@@ -321,24 +329,24 @@ def execute_for_graph(file, training = True):
 
     check_parameters(env)
     windowed_success = 0
-    num_episodes = 500
+    num_episodes = 500 if training else 1
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -500
-    eps = INIT_EPS
     for episode in range_episode:
 
         observation = env.reset()
         episode_reward = 0
         episode_stats = {"nb_of_moves": 0,
                          "nb_key_found": 0}
-        eps = eps * EPS_DECAY if training else 0.0
+        global EPS 
+        EPS = EPS * EPS_DECAY if training else 0.0
 
         while True:
             first_node = observation.x[0]
             action_mask = env._get_action_mask()
 
-            action = agent.act(first_node,action_mask, eps)
+            action = agent.act(first_node,action_mask, EPS)
             new_observation, reward, done, info = env.step(action)
             episode_reward += reward
             if training:
@@ -357,13 +365,22 @@ def execute_for_graph(file, training = True):
 
         if episode_reward > max_reward:
             max_reward = episode_reward
+                # Update the plot after each episode
 
+        """
+        ax.clear()
+        ax.plot(agent.gradient_norms)
+        ax.set_title("Gradient Norms During Training")
+        ax.set_xlabel("Training Steps")
+        ax.set_ylabel("Average Gradient Norm")
+        plt.pause(0.001)  # Pause briefly to update the plot
+        """
         avg_reward = np.mean(episode_rewards[-100:])
         keys_found = episode_stats["nb_key_found"]
-        range_episode.set_description(f"MER : {max_reward:.2f}, KeysFound : {keys_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {eps:.2f}")
+        range_episode.set_description(f"MER : {max_reward:.2f}, KeysFound : {keys_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {EPS:.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
-    
+    plt.ioff()  # Turn off interactive mode when done
     return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:
@@ -384,9 +401,12 @@ def visualize(rewards):
 
 
 #take random files from folder and execute
-nb_random_files = 13
+nb_random_files = 3
 
 nb_try = 4
+
+EPS = INIT_EPS
+
 for curr_try in range( nb_try):
     random_files = random.sample(os.listdir(FOLDER), nb_random_files)
     i = 0
@@ -396,11 +416,6 @@ for curr_try in range( nb_try):
             print(f"[{i} / {nb_random_files}] : Executing Training for {file}")
             execute_for_graph(FOLDER + file, True)
     
-    #take random file from folder and execute
-    random_file = random.choice(os.listdir(FOLDER))
-    print(f"Executing Testing for {random_file}")
-    rewards, succes_rate = execute_for_graph(FOLDER + random_file, False)
-    print(f"Success rate : {succes_rate}")
 
 #take random file from folder and execute
 random_file = random.choice(os.listdir(FOLDER))
@@ -410,7 +425,6 @@ print(f"Success rate : {succes_rate}")
 visualize(rewards)
 
         
-
 # Save Model
 save_model = input("Do you want to save the model? (y/n)")
 if save_model == "y":
