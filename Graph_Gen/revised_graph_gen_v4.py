@@ -60,8 +60,6 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                     if first_valid_pointer_offset == -1:
                         first_valid_pointer_offset = i/chunk_size
 
-
-
                     valid_pointer_count += 1
                 else:
                     last_pointer_offset = i/chunk_size
@@ -99,8 +97,8 @@ def update_node(graph, source, chunk_size, raw_data, json_data, offset, heap_sta
                     if hex(source)[2:] in str(value):
                         cat_counter += 1
                         graph.nodes[source].update({'label': key, 'cat': cat_counter})
-
-        if hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]):
+          
+        if json_data["SSH_STRUCT_ADDR"] and hex(source)[2:] in str(json_data["SSH_STRUCT_ADDR"]) :
             graph.nodes[source].update({'label': "SSH_STRUCT_ADDR"})
     
     VISITED.add(source)
@@ -167,15 +165,19 @@ def iterative_edge_addition(graph, raw_data, start_node, json_data, heap_start, 
                         graph.add_edge(current_node, potential_pointer, offset=(offset+i)/chunk_size)
                         stack.append(potential_pointer)
 
+
+
 def process_raw_file(raw_file, json_file, training):
     """Process raw and JSON files to construct the graph."""
     with open(json_file) as f, open(raw_file, "rb") as f2:
         json_data, raw_data, graph = json.load(f), f2.read(), nx.DiGraph()
     heap_start = int(json_data["HEAP_START"], 16)
     
-    iterative_edge_addition(graph, raw_data, int(json_data["SSH_STRUCT_ADDR"], 16), json_data, heap_start, training)
+    iterative_edge_addition(graph, raw_data, heap_start, json_data, heap_start, training)
 
     return graph
+
+
 
 def generate_graph(raw_file, json_file, output_folder, training):
     """Generate graph from raw file and json file."""
@@ -183,15 +185,29 @@ def generate_graph(raw_file, json_file, output_folder, training):
     graph = process_raw_file(raw_file, json_file, training)
     nx.write_graphml(graph, os.path.join(output_folder, os.path.basename(raw_file).replace(".raw", ".graphml")))
 
+
 def main(folder_path, output_folder, training):
     """Main function to process folder of files and generate graphs."""
     os.makedirs(output_folder, exist_ok=True)
-    for raw_file in tqdm(os.listdir(folder_path)):
-        if raw_file.endswith("-heap.raw"):
-            json_file = raw_file.replace("-heap.raw", ".json")
-            generate_graph(os.path.join(folder_path, raw_file), 
-                           os.path.join(folder_path, json_file), 
-                           output_folder, training)
+
+    # Prepare a list of all files that need to be processed
+    files_to_process = []
+    for root, dirs, files in os.walk(folder_path):
+        # Create corresponding subdirectories in the output folder
+        for dir in dirs:
+            os.makedirs(os.path.join(output_folder, os.path.relpath(os.path.join(root, dir), folder_path)), exist_ok=True)
+
+        for file in files:
+            if file.endswith("-heap.raw"):
+                raw_file_path = os.path.join(root, file)
+                files_to_process.append(raw_file_path)
+
+    # Process each file with a tqdm progress bar
+    for raw_file_path in tqdm(files_to_process, desc="Processing files"):
+        json_file_path = raw_file_path.replace("-heap.raw", ".json")
+        output_subfolder = os.path.join(output_folder, os.path.relpath(os.path.dirname(raw_file_path), folder_path))
+        generate_graph(raw_file_path, json_file_path, output_subfolder, training)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process raw memory data and generate graphs.")
@@ -201,3 +217,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args.folder_path, args.output_folder, args.training)
+
+

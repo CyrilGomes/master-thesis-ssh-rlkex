@@ -10,7 +10,7 @@ from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 import concurrent.futures
 from numba import jit
-
+from .gnn import GNN
 @jit(nopython=True)
 def compute_reward(previous_dist, current_dist, has_found_target, visit_count, 
                    TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
@@ -135,7 +135,11 @@ class GraphTraversalEnv(gym.Env):
         """
         Loads the subgraph detection model.
         """
-        return torch.load(self.subgraph_detection_model_path)
+        model = GNN()
+        model.load_state_dict(torch.load(self.subgraph_detection_model_path))
+        model.eval()  # Set the network to evaluation mode
+        model = model.to(self.device)
+        return model
     
     def _sort_promising_nodes(self):
         """
@@ -175,8 +179,7 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_valid_pointer_offset'],
         ] for _, attributes in graph.nodes(data=True)], dtype=torch.float)
 
-        edge_attr = torch.tensor([graph[u][v]['offset'] for u, v in graph.edges], dtype=torch.float).unsqueeze(1)
-        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        edge_attr = torch.tensor([data['offset'] for u, v, data in graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
         y = torch.tensor([1 if any(attributes['cat'] == 1 for _, attributes in graph.nodes(data=True)) else 0], dtype=torch.float)
 
         return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y).to(self.device)
@@ -522,6 +525,29 @@ class GraphTraversalEnv(gym.Env):
         # Current node and its successors
         nodes = [self.current_node] + list(self.graph.neighbors(self.current_node))
 
+        #print the offset for each current_node -> neighbor edge
+        print(f"Current node: {self.current_node}")
+        
+        for neighbor in self.graph.neighbors(self.current_node):
+            #print the data of the edge
+            print(f"Trying {self.current_node} -> {neighbor}")
+            edge_data = self.graph.get_edge_data(self.current_node, neighbor)
+            print(f"Data : {edge_data}")
+
+            edge_data = self.graph.get_edge_data(self.current_node, neighbor)
+            if edge_data is not None:
+                # Iterate over all items in the edge data dictionary
+                for edge_id, attrs in edge_data.items():
+                    if 'offset' in attrs:
+                        offset = attrs['offset']
+                        print(f"Offset for edge {edge_id}: {offset}")
+                    else:
+                        print(f"No 'offset' attribute for edge {edge_id}")
+            else:
+                print("No edge data found between the nodes.")
+
+            print(f"Neighbor: {neighbor}, Offset: {offset}")
+
         # Extract node attributes in a vectorized way using list comprehensions
         attributes = np.array([[data['struct_size'],
                                 data['valid_pointer_count'],
@@ -532,8 +558,7 @@ class GraphTraversalEnv(gym.Env):
                                 data['first_valid_pointer_offset'],
                                 data['last_valid_pointer_offset'],
                                 1 if self.graph.out_degree(node) > 0 else 0,
-                                self.graph[self.current_node][node]['offset'] if node in self.graph[self.current_node] else 0,
-                                self._get_true_keys_count()
+                                max((edge_attr['offset'] for edge_id, edge_attr in self.graph[self.current_node].get(node, {}).items() if 'offset' in edge_attr), default=0),                                self._get_true_keys_count()
                                 ] for node, data in self.graph.subgraph(nodes).nodes(data=True)], dtype=np.float32)
 
         # Convert attributes to a PyTorch tensor

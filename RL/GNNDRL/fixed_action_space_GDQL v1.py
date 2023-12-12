@@ -369,8 +369,6 @@ def execute_for_graph(file, training = True, level = 0):
 
 
 
-
-
 def visualize(rewards):
     # Visualization
     window_size = 30
@@ -418,3 +416,4 @@ if save_model == "y":
     if not os.path.exists("models"):
         os.makedirs("models")
     torch.save(agent.qnetwork_local.state_dict(), f"models/{model_name}.pt")
+

@@ -34,8 +34,7 @@ import torch.nn.functional as F
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import matplotlib.pyplot as plt
 
-plt.ion()  # Turn on interactive mode
-fig, ax = plt.subplots()  # Create a figure and axis object
+
 
 # -------------------------
 # GRAPH PROCESSING
@@ -77,6 +76,33 @@ def add_global_root_node(graph):
     [graph.add_edge(root_node, node, offset=0) for node in graph.nodes() if len(list(graph.predecessors(node))) == 0 and node != root_node]
     return graph
 
+def convert_types(G):
+    # Convert the string attributes to their corresponding types
+    for node, data in G.nodes(data=True):
+        # The label remains a string, so no conversion is needed for 'label'
+        # Convert struct_size, valid_pointer_count, invalid_pointer_count,
+        # first_pointer_offset, last_pointer_offset, first_valid_pointer_offset,
+        # last_valid_pointer_offset, and address to int
+        data['struct_size'] = int(data['struct_size'])
+        data['valid_pointer_count'] = int(data['valid_pointer_count'])
+        data['invalid_pointer_count'] = int(data['invalid_pointer_count'])
+        data['first_pointer_offset'] = int(data['first_pointer_offset'])
+        data['last_pointer_offset'] = int(data['last_pointer_offset'])
+        data['first_valid_pointer_offset'] = int(data['first_valid_pointer_offset'])
+        data['last_valid_pointer_offset'] = int(data['last_valid_pointer_offset'])
+        data['address'] = int(data['address'])
+
+        # Convert cat to an integer and ensure it's within the range of a byte (0-255)
+        data['cat'] = int(data['cat'])
+        if not (0 <= data['cat'] <= 255):
+            raise ValueError(f"Value of 'cat' out of range for u8: {data['cat']}")
+
+    #Same for edges attributes (offset)
+    for u, v, data in G.edges(data=True):
+        data['offset'] = int(data['offset'])
+
+
+    return G
 
 def remove_all_isolated_nodes(graph):
     graph.remove_nodes_from(list(nx.isolates(graph)))
@@ -85,6 +111,8 @@ def preprocess_graph(graph):
     graph = nx.convert_node_labels_to_integers(graph)
     
     # Removing string attributes from nodes and edges
+    graph = remove_all_isolated_nodes(graph)
+    graph = convert_types(graph)
     for _, attributes in graph.nodes(data=True):
         for key in list(attributes):
             if isinstance(attributes[key], str):
@@ -97,8 +125,9 @@ def preprocess_graph(graph):
     nx.set_node_attributes(graph, 0, 'visited')
     #graph = connect_components(graph)
     #graph = nx.subgraph(graph, nx.bfs_tree(graph, 0))
-    graph = remove_all_isolated_nodes(graph)
+
     #graph = add_global_root_node(graph)
+    #Check if all edges possess an offset attribute
 
     return graph
 
@@ -294,13 +323,12 @@ class Agent:
 
 # Load and preprocess graph
 
-FOLDER = "Generated_Graphs/64/"
+FOLDER = "Generated_Graphs/output/basic/V_7_8_P1/24/"
 ACTION_SPACE = 50
 STATE_SPACE = 11
 META_HIDDEN_DIM = 64
 META_OUTPUT_DIM = 2
 agent = Agent(STATE_SPACE, ACTION_SPACE, seed=0)
-meta_controller = MetaController(STATE_SPACE, META_HIDDEN_DIM, META_OUTPUT_DIM).to(device)
 
 
 INIT_EPS = 0.95
@@ -380,7 +408,6 @@ def execute_for_graph(file, training = True):
         range_episode.set_description(f"MER : {max_reward:.2f}, KeysFound : {keys_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {EPS:.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
-    plt.ioff()  # Turn off interactive mode when done
     return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:

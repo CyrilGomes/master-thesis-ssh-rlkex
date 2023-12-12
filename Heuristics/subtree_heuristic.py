@@ -72,10 +72,12 @@ def preprocess_graph(graph):
         for key in list(attributes):
             if isinstance(attributes[key], str):
                 del attributes[key]
-    nx.set_node_attributes(graph, 0, 'visited')
+
     #graph = connect_components(graph)
     #graph = nx.subgraph(graph, nx.bfs_tree(graph, 0))
     graph = remove_all_isolated_nodes(graph)
+
+    print(graph.nodes(data=True))
     #graph = add_global_root_node(graph)
 
     return graph
@@ -91,6 +93,7 @@ def graph_to_data(graph):
 
     # Use the node mapping to convert node indices
     edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in graph.edges()], dtype=torch.long).t().contiguous()
+
 
     x = torch.tensor([[
         attributes['struct_size'],
@@ -176,13 +179,13 @@ class GNN(torch.nn.Module):
     
 
 def main():
-    
-    file_names = os.listdir('Generated_Graphs/64')
+    folder = 'Generated_Graphs/output/'
+    file_names = os.listdir(folder)
     #keep only the first 100 graphs
     filtered_file_names = file_names[0:20]
     subgraphs_data = []
     for file_name in filtered_file_names:
-        subgraphs_data += create_subgraph_data(os.path.join('Generated_Graphs/64', file_name))
+        subgraphs_data += create_subgraph_data(os.path.join(folder, file_name))
 
     loader = DataLoader(subgraphs_data, batch_size=126, shuffle=True, collate_fn=Batch.from_data_list)
 
@@ -196,7 +199,7 @@ def main():
 
     #get random graph and test
     random_file = random.choice(file_names)
-    random_graph_data = create_subgraph_data(os.path.join('Generated_Graphs/64', random_file))
+    random_graph_data = create_subgraph_data(os.path.join(folder, random_file))
     
     best_graph, best_score = get_best_graph(model, random_graph_data)
     print(f"{best_graph} has the best score of {best_score} with y = {best_graph.y}")
