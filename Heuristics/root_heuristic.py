@@ -6,10 +6,9 @@ import os
 import random
 import numpy as np
 import networkx as nx
-import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
+import joblib
 from collections import deque
 import numpy as np
 import random
@@ -27,7 +26,23 @@ from sklearn.model_selection import train_test_split
 # GRAPH PROCESSING
 # -------------------------
 
+def get_root_nodes_from_scc(sccs, G):
+    """If we consider each scc as a node, then we want to get the sccs that have no incoming edges."""
+    root_nodes = []
+    for scc in sccs:
+        for node in scc:
+            if len([n for n in G.predecessors(node) if n not in scc]) == 0:
+                #append the first node of the scc that has no incoming edges
+                #transform the scc to list
+                root_nodes.extend(list(scc))
+                break
+    return root_nodes
 
+
+def get_root_nodes(G):
+    """Get the root nodes of a graph."""
+    sccs = list(nx.strongly_connected_components(G))
+    return get_root_nodes_from_scc(sccs, G)
 
 def remove_all_isolated_nodes(graph):
     graph.remove_nodes_from(list(nx.isolates(graph)))
@@ -64,7 +79,7 @@ def generate_single_graph_data(G):
 
 
     #get root nodes by gettinng all nodes that has no predecessors
-    root_nodes = [node for node in G.nodes() if len(list(G.predecessors(node))) == 0]
+    root_nodes = get_root_nodes(G)
 
     data = []
 
@@ -156,7 +171,7 @@ FOLDER = 'Generated_Graphs/output/'
 features = []
 labels = []
 print("Loading graphs...")
-graphs = load_graphs(FOLDER,2, shuffle=True)
+graphs = load_graphs(FOLDER,6, shuffle=True)
 
 total_nb_nodes = 0
 for G in tqdm(graphs):
@@ -181,6 +196,7 @@ model = RandomForestClassifier()
 model.fit(X_train, y_train)
 print("Done training model!")
 
+
 """
 # Evaluate the model on the same graph
 y_pred = model.predict_proba(X_test)[:, 1]  # Get probabilities for the positive class
@@ -193,3 +209,5 @@ y_pred = model.predict(X_test)
 accuracy = sum(y_pred == y_test) / len(y_test)
 print(f"Accuracy: {accuracy:.2f}")
 
+#Save the model
+joblib.dump(model, 'models/root_heuristic_model.joblib')
