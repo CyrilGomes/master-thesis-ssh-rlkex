@@ -30,6 +30,11 @@ from torch_geometric.data import DataLoader, Batch
 import torch.nn.functional as F
 
 
+from torch_geometric.nn import GCNConv, global_mean_pool, SAGPooling
+from torch_geometric.data import Data
+import torch_geometric.transforms as T
+from torch_geometric.nn import GATConv
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import matplotlib.pyplot as plt
@@ -39,22 +44,6 @@ import matplotlib.pyplot as plt
 # -------------------------
 # GRAPH PROCESSING
 # -------------------------
-
-#class used for rl_environment for graph heuristic
-class GNN(torch.nn.Module):
-    def __init__(self, dimension=7):
-        super(GNN, self).__init__()
-        self.conv1 = GCNConv(dimension, 16)
-        self.conv2 = GCNConv(16, 1)
-
-    def forward(self, data):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.dropout(x, training=self.training)
-        x = self.conv2(x, edge_index)
-        # Use global_mean_pool to compute the mean for each graph in the batch
-        x = torch.sigmoid(global_mean_pool(x, batch))
-        return x
 
 
 def connect_components(graph):
@@ -156,77 +145,91 @@ def graph_to_data(graph):
 # HYPERPARAMETERS
 # -------------------------
 BUFFER_SIZE = int(1e5)  # replay buffer size
-BATCH_SIZE = 64         # batch size
+BATCH_SIZE = 256         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 1e-3              # soft update of target parameters
 LR = 5e-4               # learning rate
-UPDATE_EVERY = 5        # how often to update the network
+UPDATE_EVERY = 4        # how often to update the network
 
 
 
 # -------------------------
 # MODEL DEFINITION
 # -------------------------
-class QNetwork(torch.nn.Module):
-    def __init__(self, node_feature_size, action_size, seed, dropout_rate=0.2):
-        super(QNetwork, self).__init__()
+class GraphQNetwork(torch.nn.Module):
+    def __init__(self, node_feature_size, action_size, seed, heads=4):
+        super(GraphQNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
-
-        self.fc1 = torch.nn.Linear(node_feature_size, 128)
-        self.dropout1 = torch.nn.Dropout(p=dropout_rate)
-        self.fc2 = torch.nn.Linear(128, 128)
-        self.dropout2 = torch.nn.Dropout(p=dropout_rate)
+        
+        # Using Graph Attention Networks (GAT)
+        self.conv1 = GATConv(node_feature_size, 32 // heads, heads=heads, concat=True)
+        self.conv2 = GATConv(32, 32 // heads, heads=heads, concat=True)
 
         # Dueling DQN
-        self.value_stream = torch.nn.Linear(128, 128)
-        self.value = torch.nn.Linear(128, 1)
+        self.value_stream = torch.nn.Linear(32, 32)
+        self.value = torch.nn.Linear(32, 1)
         
-        self.advantage_stream = torch.nn.Linear(128, 128)
-        self.advantage = torch.nn.Linear(128, action_size)
+        self.advantage_stream = torch.nn.Linear(32, 32)
+        self.advantage = torch.nn.Linear(32, action_size)
 
-    def forward(self, state, action_mask):
-        x = F.relu(self.fc1(state))
-        x = self.dropout1(x)
-        x = F.relu(self.fc2(x))
-        x = self.dropout2(x)
-
+    def forward(self, data, action_mask=None):
+        x, edge_index = data.x, data.edge_index
+        
+        x = F.elu(self.conv1(x, edge_index))
+        x = F.elu(self.conv2(x, edge_index))
+        
+        # Global pooling
+        x = global_mean_pool(x, data.batch)
+        
         value = F.relu(self.value_stream(x))
         value = self.value(value)
-
+        
         advantage = F.relu(self.advantage_stream(x))
         advantage = self.advantage(advantage)
+        # Combine value and advantage streams
 
         qvals = value + (advantage - advantage.mean(dim=1, keepdim=True))
 
-        # Apply the action mask: set the value of masked actions to a large negative number
-        masked_qvals = qvals + action_mask
+        if action_mask is not None:
+                # Ensure the mask is the same shape and on the same device as qvals
+                action_mask = action_mask.to(qvals.device)
+                qvals += action_mask
 
-        return masked_qvals
+        return qvals
+
+
 
 # -------------------------
 # AGENT DEFINITION
 # -------------------------
 class Agent:
-    def __init__(self, state_size, action_size, seed, weight_decay=1e-5):
+    def __init__(self, state_size, action_size, seed):
         self.state_size = state_size
         self.action_size = action_size
         self.seed = random.seed(seed)
 
         # Q-Network
-        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
-        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_local = GraphQNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_target = GraphQNetwork(state_size, action_size, seed).to(device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
 
         # Replay memory
         self.memory = deque(maxlen=BUFFER_SIZE)
-        self.experience = namedtuple("experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask"])
+        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask", "next_action_mask"])
+
         self.t_step = 0
 
-        self.gradient_norms = []  # Add this line to store gradient norms
+        self.losses = []
 
-    def step(self, state, action, reward, next_state, done, action_mask):
+    def step(self, state, action, reward, next_state, done, action_mask=None, next_action_mask=None):
+        #ensure everything is on device
+        state = state.to(device)
+        next_state = next_state.to(device)
+        
+
+
         # Save experience in replay memory
-        e = self.experience(state, action, reward, next_state, done, action_mask)
+        e = self.experience(state, action, reward, next_state, done, action_mask, next_action_mask)
         self.memory.append(e)
 
         # Learn every UPDATE_EVERY time steps.
@@ -236,82 +239,72 @@ class Agent:
                 experiences = self.sample()
                 self.learn(experiences, GAMMA)
 
-    def act(self, state, action_mask, eps=0.):
-            state = state.float().unsqueeze(0).to(device)
-            action_mask = torch.tensor(action_mask).to(device)
-            self.qnetwork_local.eval()
-            with torch.no_grad():
-                action_values = self.qnetwork_local(state, action_mask)
-            self.qnetwork_local.train()
+    def act(self, state, eps=0, action_mask=None):
 
-            # Epsilon-greedy action selection
-            if random.random() > eps:
-                return np.argmax(action_values.cpu().data.numpy())
-            else:
+        state = state.to(device)
+        self.qnetwork_local.eval()
+        action_mask = torch.tensor(action_mask).to(device)
 
-                return random.choice(np.where(action_mask.cpu() == 0)[0])  # Select from valid actions only
+        with torch.no_grad():
+            action_values = self.qnetwork_local(state, action_mask)
+        self.qnetwork_local.train()
+
+        # Epsilon-greedy action selection
+        if random.random() > eps:
+            return np.argmax(action_values.cpu().data.numpy())
+        else:
+            return random.choice(np.where(action_mask.cpu() == 0)[0])  # Select from valid actions only
 
     def learn(self, experiences, gamma):
-        states, actions, rewards, next_states, dones, next_state_masks = experiences
+        states, actions, rewards, next_states, dones, action_masks, next_action_masks = experiences
+
         # DDQN
-        indices = self.qnetwork_local(next_states, next_state_masks).detach().argmax(1).unsqueeze(1)
-        Q_targets_next = self.qnetwork_target(next_states, next_state_masks).detach().gather(1, indices)
+        indices = self.qnetwork_local(next_states, next_action_masks).detach().argmax(1).unsqueeze(1)
+        Q_targets_next = self.qnetwork_target(next_states, next_action_masks).detach().gather(1, indices)
+
+        # Reshape rewards and dones to be column vectors
+        rewards = rewards.unsqueeze(1)
+        dones = dones.unsqueeze(1)
 
         # Compute Q targets for current states
         Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
 
         # Get expected Q values from local model
-        Q_expected = self.qnetwork_local(states, next_state_masks).gather(1, actions)
+        Q_expected = self.qnetwork_local(states, action_masks).gather(1, actions)
 
         # Compute loss
         loss = F.mse_loss(Q_expected, Q_targets)
+        self.losses.append(loss.item())
         self.optimizer.zero_grad()
         loss.backward()
-
-        # Monitoring gradients
-        # Compute and store average gradient norms
-        average_norm = 0
-        for name, param in self.qnetwork_local.named_parameters():
-            if param.grad is not None:
-                average_norm += param.grad.data.norm(2).item()
-        average_norm /= len(list(self.qnetwork_local.named_parameters()))
-        self.gradient_norms.append(average_norm)
-        
-
-        # Gradient clipping
-        #clip_value = 1 
-        #torch.nn.utils.clip_grad_norm_(self.qnetwork_local.parameters(), clip_value)
-
         self.optimizer.step()
 
         # Soft update target network
         self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
 
-    def plot_gradient_norms(gradient_norms):
-        plt.plot(gradient_norms)
-        plt.title("Gradient Norms During Training")
-        plt.xlabel("Training Steps")
-        plt.ylabel("Average Gradient Norm")
-        plt.show()
 
 
     def soft_update(self, local_model, target_model, tau):
-        for target_param, local_param in zip(self.qnetwork_target.parameters(), self.qnetwork_local.parameters()):
-            target_param.data.mul_(1.0 - tau)
-            target_param.data.add_(tau * local_param.data)
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
     def sample(self):
         experiences = random.sample(self.memory, k=BATCH_SIZE)
 
-        # Extract experiences and action masks
-        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(device)
-        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).long().to(device)
-        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(device)
-        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(device)
-        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(device)
-        action_masks = torch.from_numpy(np.vstack([e.action_mask for e in experiences if e is not None])).float().to(device)
+        states = Batch.from_data_list([e.state for e in experiences if e is not None]).to(device)
+        
+        actions = torch.tensor([e.action for e in experiences if e is not None], dtype=torch.long).unsqueeze(-1).to(device)
+        rewards = torch.tensor([e.reward for e in experiences if e is not None]).to(device)
+        
+        # You should handle next_states in the same manner as states, given that it also contains graph data
+        next_states = Batch.from_data_list([e.next_state for e in experiences if e is not None]).to(device)
+        
+        dones = torch.tensor([torch.tensor(e.done, dtype=torch.uint8) for e in experiences if e is not None]).to(device).float()
+        # Convert the list of numpy arrays to a single numpy array before converting to a tensor
+        action_masks = torch.tensor(np.array([e.action_mask for e in experiences if e is not None])).to(device)
+        next_action_masks = torch.tensor(np.array([e.next_action_mask for e in experiences if e is not None])).to(device)
 
-        return (states, actions, rewards, next_states, dones, action_masks)
+        return (states, actions, rewards, next_states, dones, action_masks, next_action_masks)
 
 
 
@@ -324,14 +317,13 @@ class Agent:
 
 FOLDER = "Generated_Graphs/output/"
 ACTION_SPACE = 50
-STATE_SPACE = 11
-META_HIDDEN_DIM = 64
-META_OUTPUT_DIM = 2
+STATE_SPACE = 9
+
 agent = Agent(STATE_SPACE, ACTION_SPACE, seed=0)
 
 
 INIT_EPS = 0.98
-EPS_DECAY = 0.99992
+EPS_DECAY = 0.99991
 
 
 def check_parameters(env):
@@ -352,54 +344,81 @@ def execute_for_graph(file, training = True):
     print("Number of target nodes : ", len(target_nodes))
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes)
+    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
 
     check_parameters(env)
     windowed_success = 0
-    num_episodes = 200 if training else 2
+    num_episodes = 5000 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -500
-    for episode in range_episode:
+    max_key_found = 0
+    max_posssible_key = 0
 
+
+    #find the factor to which I have to multiply curr_eps such that at the end of the training it is 0.05
+    
+    curr_eps = 0.99
+    for episode in range_episode:
         observation = env.reset()
         episode_reward = 0
         episode_stats = {"nb_of_moves": 0,
-                         "nb_key_found": 0}
+                         "nb_key_found": 0,
+                         'nb_possible_keys' : 0}
         global EPS 
         if training:
             EPS = EPS * EPS_DECAY
-        curr_eps = EPS if training else 0.0
+        
+        #a function of episode over num_epsiode, such that at the end it is 0.05, linear
+        curr_eps =    (0.99) * (1 - episode / num_episodes)
         curr_episode_rewards = []
         while True:
-            first_node = observation.x[0]
             action_mask = env._get_action_mask()
 
-            action = agent.act(first_node,action_mask, curr_eps)
+            action = agent.act(observation,curr_eps, action_mask)
             new_observation, reward, done, info = env.step(action)
-            episode_reward += reward
+            next_action_mask = env._get_action_mask()
             curr_episode_rewards.append(reward)
             if training:
-                agent.step(first_node, action, reward, new_observation.x[0], done, action_mask)
+                agent.step(observation, action, reward, new_observation, done, action_mask, next_action_mask)
 
             episode_stats["nb_of_moves"] += 1
             
             if done:
                 episode_stats["nb_key_found"] = info["nb_keys_found"]
+                episode_stats["nb_possible_keys"] = info["nb_possible_keys"]
                 if info["found_target"]:
                     stats["nb_success"] += 1
-
+                    #print("Success !")
                     windowed_success += 1
                 break
+            
             observation = new_observation
+        
+        episode_reward = np.sum(curr_episode_rewards)
         """
         if episode == num_episodes - 1:
             plt.plot(curr_episode_rewards)
             plt.show()
         """
+        """
+        if episode_stats["nb_key_found"] > max_key_found:
+            max_key_found = episode_stats["nb_key_found"]
+            max_posssible_key = episode_stats["nb_possible_keys"]
+        """
         if episode_reward > max_reward:
             max_reward = episode_reward
-                # Update the plot after each episode
+            max_key_found = episode_stats["nb_key_found"]
+            max_posssible_key = episode_stats["nb_possible_keys"]
+
+
+        if episode % 500 == 499:
+            #plot the losses of the agent
+            moving_average = np.convolve(agent.losses, np.ones((100,))/100, mode='valid')
+            plt.plot(moving_average)
+            plt.show()
+
+        # Update the plot after each episode
 
         """
         ax.clear()
@@ -409,11 +428,14 @@ def execute_for_graph(file, training = True):
         ax.set_ylabel("Average Gradient Norm")
         plt.pause(0.001)  # Pause briefly to update the plot
         """
-        avg_reward = np.mean(episode_rewards[-100:])
+
+
+        avg_reward = np.mean(episode_rewards[-10:]) if len(episode_rewards) > 0 else 0.0
         keys_found = episode_stats["nb_key_found"]
-        range_episode.set_description(f"MER : {max_reward:.2f}, KeysFound : {keys_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {EPS:.2f}")
+        range_episode.set_description(f"MKF : {max_key_found}/{len(target_nodes)}/{max_posssible_key}, MER : {max_reward:.2f}, KeysFound : {keys_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
+        
     return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:

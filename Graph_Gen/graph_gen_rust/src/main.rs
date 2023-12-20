@@ -253,10 +253,10 @@ fn process_struct(heap_data: &[u8], pointer_address: usize, graph: &mut DiGraph<
         cat: if is_key_pointer(pointer_address, json) { 1 } else { 0 },
         valid_pointer_count: 0,
         invalid_pointer_count: 0,
-        first_pointer_offset: 0,
-        last_pointer_offset: 0,
-        first_valid_pointer_offset: 0,
-        last_valid_pointer_offset: 0,
+        first_pointer_offset: -1,
+        last_pointer_offset: -1,
+        first_valid_pointer_offset: -1,
+        last_valid_pointer_offset: -1,
         address: pointer_address,
     };
 
@@ -276,27 +276,28 @@ fn process_struct(heap_data: &[u8], pointer_address: usize, graph: &mut DiGraph<
 
                 
                 processed_addresses.insert(pointer_address + offset);
-                struct_pointer.last_pointer_offset = offset;
-                if struct_pointer.first_pointer_offset == usize::MAX {
-                    struct_pointer.first_pointer_offset = offset;
+                struct_pointer.last_pointer_offset = offset as isize;
+                if struct_pointer.first_pointer_offset == -1 {
+                    struct_pointer.first_pointer_offset = offset as isize;
                 }
 
                 let is_within_bounds: bool = potential_pointer >= heap_start && potential_pointer < heap_start + heap_size;
                 if is_within_bounds {
                     struct_pointer.valid_pointer_count += 1;
-                    struct_pointer.last_valid_pointer_offset = offset;
-                    if struct_pointer.first_valid_pointer_offset == usize::MAX {
-                        struct_pointer.first_valid_pointer_offset = offset;
+                    struct_pointer.last_valid_pointer_offset = offset as isize;
+                    if struct_pointer.first_valid_pointer_offset == -1{
+                        struct_pointer.first_valid_pointer_offset = offset as isize;
                     }
                 } else {
                     struct_pointer.invalid_pointer_count += 1;
                 }
 
-                // Add edge and possibly recurse
-                let edge = Edge { offset }; // Create an edge with the offset
-                let target_node = create_or_get_node(graph, potential_pointer, 0, format!("{:#x}", potential_pointer), is_key_pointer(potential_pointer, json));
-                graph.add_edge(current_node, target_node, edge); // Add the edge with offset
-                if is_within_bounds && !processed_addresses.contains(&potential_pointer) {
+
+                if is_within_bounds{
+                    // Add edge and possibly recurse
+                    let edge = Edge { offset }; // Create an edge with the offset
+                    let target_node = create_or_get_node(graph, potential_pointer, 0, format!("{:#x}", potential_pointer), is_key_pointer(potential_pointer, json));
+                    graph.add_edge(current_node, target_node, edge); // Add the edge with offset
                     process_struct(heap_data, potential_pointer, graph, processed_addresses, heap_start, heap_size, &json, false);
                 }
             }
@@ -349,10 +350,10 @@ fn create_or_get_node(graph: &mut DiGraph<Pointer, Edge>, address: usize, struct
         cat: if is_key { 1 } else { 0 },
         valid_pointer_count: 0,
         invalid_pointer_count: 0,
-        first_pointer_offset: 0,
-        last_pointer_offset: 0,
-        first_valid_pointer_offset: 0,
-        last_valid_pointer_offset: 0,
+        first_pointer_offset: -1,
+        last_pointer_offset: -1,
+        first_valid_pointer_offset: -1,
+        last_valid_pointer_offset: -1,
         address: address,
     };
 
@@ -447,10 +448,10 @@ struct Pointer {
     cat: u8,                        // Category flag (1 for Key, 0 otherwise)
     valid_pointer_count: usize,     // Count of valid pointers within the struct
     invalid_pointer_count: usize,   // Count of invalid pointers within the struct
-    first_pointer_offset: usize,    // Offset of the first pointer in the struct
-    last_pointer_offset: usize,     // Offset of the last pointer in the struct
-    first_valid_pointer_offset: usize,  // Offset of the first valid pointer
-    last_valid_pointer_offset: usize,   // Offset of the last valid pointer
+    first_pointer_offset: isize,    // Offset of the first pointer in the struct can be negative
+    last_pointer_offset: isize,     // Offset of the last pointer in the struct
+    first_valid_pointer_offset: isize,  // Offset of the first valid pointer
+    last_valid_pointer_offset: isize,   // Offset of the last valid pointer
     address: usize,                  // The address of the struct in memory
 }
 
