@@ -50,7 +50,10 @@ class GraphPredictor:
         root_nodes = self._get_root_nodes(G)
         for node in root_nodes:
             features = self._extract_features(G, node)
+            #only keep nodes with probability > 0.5
             probability = self.model.predict_proba([features])[0][1]
+            
             probabilities[node] = probability
+
         return probabilities
     

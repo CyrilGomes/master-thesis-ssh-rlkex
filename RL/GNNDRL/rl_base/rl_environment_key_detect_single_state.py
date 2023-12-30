@@ -13,18 +13,19 @@ from numba import jit
 
 from rl_base.root_heuristic_rf import GraphPredictor
 from .gnn import GNN
+
 @jit(nopython=True)
 def compute_reward(previous_dist, current_dist, has_found_target, visit_count, 
                    TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
                    PROXIMITY_BONUS, NEW_NODE_BONUS, NO_PATH_PENALTY, 
                    ADDITIONAL_TARGET_MULTIPLIER, visited_keys_count, 
-                   max_episode_steps, nb_actions_taken, true_keys_count):
+                   max_episode_steps, nb_actions_taken):
     
     if nb_actions_taken > max_episode_steps:
         # Logic for final reward when max episode steps are reached
         return -1 * nb_actions_taken 
     if has_found_target:
-        target_reward =  TARGET_FOUND_REWARD * (ADDITIONAL_TARGET_MULTIPLIER ** true_keys_count) 
+        target_reward =  TARGET_FOUND_REWARD * (ADDITIONAL_TARGET_MULTIPLIER ** visited_keys_count) 
         return target_reward
     if current_dist is None:
         return NO_PATH_PENALTY
@@ -48,9 +49,12 @@ class GraphTraversalEnv(gym.Env):
             max_episode_steps (int): Maximum steps allowed per episode.
         """
         super(GraphTraversalEnv, self).__init__()
+        self.path_cache = {}
 
         self._validate_graph(graph)
         self.main_graph = graph
+
+
         self.target_nodes = target_nodes
         self.max_episode_steps = max_episode_steps
         self.shortest_path_cache = {}
@@ -65,34 +69,108 @@ class GraphTraversalEnv(gym.Env):
         print("Model loaded!")
         #get proba for all root nodes, returns a map of root node -> proba
         self.root_proba = self.root_detector.predict_probabilities(self.main_graph)
-        #sort every roots based on proba, ommit the ones with 0 proba
+
+
+        #sort every roots based on proba, ommit the ones with less than 0.5 proba
+         
         self.sorted_roots = sorted(self.root_proba, key=self.root_proba.get, reverse=True)
+
+        #remvove the roots with proba < 0.5
+        self.sorted_roots = [root for root in self.sorted_roots if self.root_proba[root] > 0.5]
         #from the current_node_iterator, get the corresponding root
-        self.current_root = self.sorted_roots[self.current_node_iterator]
+        self.best_root, ref_graph = self._get_best_root()
         #update the graph to be the subgraph of the root (using BFS)
-        self.reference_graph = self.main_graph.subgraph(nx.bfs_tree(self.main_graph, self.current_root))
+        self.reference_graph = ref_graph
+        centralities = self.compute_centralities(graph=ref_graph)
+        for node in ref_graph.nodes():
+            ref_graph.nodes[node].update(centralities[node])
+
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 9 if self.obs_is_full_graph else 11
+        self.state_size = 13 if self.obs_is_full_graph else 11
         self._update_action_space()
 
         self.observation_space = self._define_observation_space()
         self.visited_keys = {}
         self.nb_targets = len(self.target_nodes)
         self.nb_actions_taken = 0
+        self.reset()
+        self.assess_target_complexity()
+
+
+    def assess_target_complexity(self):
+        print("-------------------- ASSESSING TARGET COMPLEXITY ----------------------")
+        cycles = list(nx.simple_cycles(self.graph))
+
+        has_cycle = len(cycles) > 0
+        print(f"Has cycles: {has_cycle}")
+        if has_cycle:
+            print("Cycles found:", cycles)
+        print(f"Number of targets: {self.nb_targets}")
+        print(f"Number of nodes in the graph: {len(self.graph.nodes)}")
+        print(f"Number of edges in the graph: {len(self.graph.edges)}")
+        #get the number of nodes between the current node and the target nodes
+        sum_path = 0
+        for target in self.target_nodes:
+            sum_path += self._get_path_length(self.current_node, target)
+        print(f"Path length from current node to target nodes: {sum_path}")
+        mean_number_of_neighbors = np.mean([self.graph.out_degree(node) for node in self.graph.nodes])
+        print(f"Mean number of neighbors: {mean_number_of_neighbors}")
+        depth = nx.dag_longest_path_length(self.graph)
+        print(f"Depth of the graph: {depth}")
+        nb_neighbours_root = self.graph.out_degree(self.best_root)
+        print(f"Number of neighbors of the root: {nb_neighbours_root}")
+        print("------------------------------------------------------------------------")
+
+
+
+    def _get_best_root(self):
+
+        #get root with highest proba
+        best_root = self.sorted_roots[self.current_node_iterator]
+
+        best_subgraph = nx.bfs_tree(self.main_graph, best_root)
+
+
+        #check if there is a path from root to all target nodes
+        has_path = {}
+        for target in self.target_nodes:
+            try:
+                path = nx.shortest_path(best_subgraph, best_root, target)
+                has_path[target] = True
+            except nx.NetworkXNoPath:
+                has_path[target] = False
+
+        #if there is no path from root to all target nodes, throw an error
+        if not all(has_path.values()):
+            raise ValueError("There is no path from root to all target nodes")
+
+        for node in best_subgraph.nodes():
+            # Copy node attributes
+            best_subgraph.nodes[node].update(self.main_graph.nodes[node])
+        for u, v in best_subgraph.edges():
+            # In a multigraph, there might be multiple edges between u and v.
+            # Here, we take the attributes of the first edge.
+            if self.main_graph.has_edge(u, v):
+                key = next(iter(self.main_graph[u][v]))
+                best_subgraph.edges[u, v].update(self.main_graph.edges[u, v, key])
+
+        return best_root, best_subgraph
+
+
 
     def _validate_graph(self, graph):
         if not isinstance(graph, nx.Graph):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 100
-        self.STEP_PENALTY = -2
-        self.REVISIT_PENALTY = -0.5
-        self.PROXIMITY_BONUS = 20
-        self.NEW_NODE_BONUS = 3
-        self.NO_PATH_PENALTY = -500
+        self.TARGET_FOUND_REWARD = 1.2
+        self.STEP_PENALTY = -0.1
+        self.REVISIT_PENALTY = -0.05
+        self.PROXIMITY_BONUS = 0.8
+        self.NEW_NODE_BONUS = 0.001
+        self.NO_PATH_PENALTY = -1
         self.ADDITIONAL_TARGET_MULTIPLIER = 1.5
 
 
@@ -177,11 +255,19 @@ class GraphTraversalEnv(gym.Env):
         """
         # If no path exists, return None.
         try:
+            # Check if the path is in the cache
+            if (self.current_node, self.target_node) in self.path_cache:
+                return self.path_cache[(self.current_node, self.target_node)]
+            
             path = nx.shortest_path(self.graph, self.current_node, self.target_node)
-            return len(path) - 1
+            dist = len(path) - 1
+
+            # Store the path length in the cache
+            self.path_cache[(self.current_node, self.target_node)] = dist
+
+            return dist
         except nx.NetworkXNoPath:
             return None
-
 
 
     def _sample_start_node(self):
@@ -191,7 +277,10 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             Node: A node from sorted promising roots to start the episode.
         """
-        return self.sorted_roots[self.current_node_iterator]
+
+        #only keep the roots with proba > 0.5
+        return self.best_root
+
 
     def _update_action_space(self):
         """
@@ -245,12 +334,7 @@ class GraphTraversalEnv(gym.Env):
 
         neighbors = list(self.graph.neighbors(self.current_node))[:self.action_space.n]
         valid_actions = [i for i, _ in enumerate(neighbors)]
-        valid_actions.append(self.action_space.n - 1)  # Adding the stop action
-        #remove the stop action if exist
-        """
-        if self.action_space.n - 1 in valid_actions:
-            valid_actions.remove(self.action_space.n - 1)
-        """
+
         #if there are acion over the action space, remove them
 
         return valid_actions
@@ -290,115 +374,37 @@ class GraphTraversalEnv(gym.Env):
 
 
     def step(self, action):
-        """
-        Executes a step in the environment given an action.
-
-        Args:
-            action (int): The action to be taken.
-
-        Returns:
-            tuple: Observation, reward, done flag, and additional info.
-        """
-
-
-        # Check if the action is to stop searching for more keys
-        if action == self.action_space.n - 1:
-            
-            nb_true_keys = self._get_true_keys_count()
-            # Special action for stopping the search
-            reward = 0
-
-            if self.nb_targets == nb_true_keys:
-                reward = 200
-                done = True
-                found_target = True
-                reward -=  self.nb_actions_taken
-
-            else:
-                reward = -3 * (len(self.visited_keys)- nb_true_keys) - 10*(self.nb_targets - nb_true_keys)
-                done = True
-                found_target = False
-            return self._get_obs(), reward, done, {'found_target': found_target, 
-                                                   'nb_keys_found': self._get_true_keys_count(),
-                                                   'nb_possible_keys' : len(self.visited_keys)}
-
-        # Update the target node based on the current node
-        self.update_target()
-
+        previous_dist = self._get_dist_to_target()
+        self._perform_action(action)
+        visit_count = self.graph.nodes[self.current_node]['visited']
+        current_dist = 0 if self.current_node == self.target_node else self._get_dist_to_target()
+        has_found_target = self.current_node == self.target_node
+        reward = compute_reward(previous_dist, current_dist, has_found_target, visit_count,
+                                self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY,
+                                self.PROXIMITY_BONUS, self.NEW_NODE_BONUS, self.NO_PATH_PENALTY,
+                                self.ADDITIONAL_TARGET_MULTIPLIER, len(self.visited_keys),
+                                self.max_episode_steps, self.nb_actions_taken)
         self.nb_actions_taken += 1
 
-        if self.target_node is not None:
-            # Calculate distance to the target node before performing the action
-            previous_dist = self._get_dist_to_target()
-
-        # Regular action: moving to another node
-        self._perform_action(action)
-
-        # Get the number of times the current node has been visited
-        visit_count = self.graph.nodes[self.current_node]['visited']
-
-        reward = -200
-        current_dist = None
-        if self.target_node is not None :
-
-            # Calculate distance to the target node after performing the action
-            current_dist = self._get_dist_to_target() if self.current_node != self.target_node else 0
-
-
-
-            # Check if the current node is the target node
-            has_found_target = self.current_node == self.target_node
-
-
-            # Compute the reward based on the state before and after the action
-            reward = compute_reward(previous_dist, current_dist, has_found_target, visit_count,
-                                    self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY,
-                                    self.PROXIMITY_BONUS, self.NEW_NODE_BONUS, self.NO_PATH_PENALTY,
-                                    self.ADDITIONAL_TARGET_MULTIPLIER, len(self.visited_keys),
-                                    self.max_episode_steps, self.nb_actions_taken, self._get_true_keys_count())
-            if has_found_target:
-                self.nb_actions_taken = int(self.nb_actions_taken  *0.70)
-
-        # Check if the episode is over
-        done = self.nb_actions_taken > self.max_episode_steps or current_dist is None
-
-
-        #check if leaf node and if so, restart from root
-        if self.graph.out_degree(self.current_node) == 0:
-            #remove the edge from the previous node to the current node
-            #print the number of edges before removing
-            if len (self.visited_stack) >= 2:
-                self.graph.remove_edge(self.visited_stack[-2], self.current_node)
-
-
-        
-
+        is_incorect_leaf = False
+        if has_found_target:
+            #print(f"Found target {self.target_node}! reward : {reward}")
             self.visited_keys.add(self.current_node)
+            obs = self._get_obs()
             self._restart_agent_from_root()
+            self.update_target()
+            return obs, reward, False, self._episode_info()
+        elif self.graph.out_degree(self.current_node) == 0:
+            is_incorect_leaf = True
+
+        obs = self._get_obs()
+        done = self.visited_keys == self.nb_targets or self.nb_actions_taken > self.max_episode_steps or current_dist is None or is_incorect_leaf
+        if self.target_node is None and not done:
+            #print("Oh no :c")
+            return obs, reward, True, self._episode_info()
+        return obs, reward, done, self._episode_info()
 
 
-        return self._get_obs(), reward, done, self._episode_info()
-
-    
-    def _is_episode_over(self):
-        """
-        Checks if the episode has reached its end conditions.
-
-        Returns:
-            bool: True if episode is over, False otherwise.
-        """
-        return self.nb_actions_taken > self.max_episode_steps
-
-    def _finalize_episode(self):
-        """
-        Finalizes the episode, providing the final observation and other details.
-
-        Returns:
-            tuple: Final observation, reward, done flag, and additional info.
-        """
-        reward = self._final_reward()
-        return self._get_obs(), reward, True, self._episode_info(found_target=len(self.visited_keys) == self.nb_targets)
-    
 
     def _perform_action(self, action):
         """
@@ -438,7 +444,6 @@ class GraphTraversalEnv(gym.Env):
         """
         return {
             'found_target': found_target,
-            'max_episode_steps_reached': self._is_episode_over(),
             'nb_keys_found': self._get_true_keys_count(),
             'nb_possible_keys' : len(self.visited_keys)
         }
@@ -495,6 +500,20 @@ class GraphTraversalEnv(gym.Env):
     
 
 
+    def compute_centralities(self, graph):
+        """
+        Computes the centrality measures for all nodes in the graph.
+
+        Returns:
+            dict: A mapping from node to centrality measure.
+        """
+        return {
+            node: {
+                'degree_centrality': nx.degree_centrality(graph)[node]
+            } for node in graph.nodes()
+        }
+
+
     def _get_graph_obs(self):
         """
         convvert self.graph to data, only keep
@@ -515,6 +534,12 @@ class GraphTraversalEnv(gym.Env):
 
         #set the node "is_current" to 1 if it is the current node, 0 otherwise
         #set the number of keys found
+
+        #give each node the index from the visited stack
+
+        nb_target_left = self.nb_targets - len(self.visited_keys)
+        nb_actions =  self.max_episode_steps - self.nb_actions_taken
+
         x = torch.tensor([[
             attributes['struct_size'],
             attributes['valid_pointer_count'],
@@ -523,13 +548,35 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_pointer_offset'],
             attributes['first_valid_pointer_offset'],
             attributes['last_valid_pointer_offset'],
+            self.visited_stack.index(node) if node in self.visited_stack else -1,
+            nb_actions,
+            nb_target_left,
+            #centraility measures
+            attributes['degree_centrality'],
+            0 if self.graph.out_degree(node) > 0 else 1,
             1 if node == self.current_node else 0,
-            len(self.visited_keys),
+
         ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
 
-        edge_attr = torch.tensor([data['offset'] for u, v, data in self.graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        
 
+        edge_attr = torch.tensor([data['offset'] for u, v, data in self.graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        # Normalize edge attributes
+        edge_attr_np = edge_attr.numpy()
+        edge_attr_np = (edge_attr_np - np.mean(edge_attr_np, axis=0)) / np.std(edge_attr_np, axis=0)
+        edge_attr = torch.tensor(edge_attr_np, dtype=torch.float)
+        
+
+        # Standardize features (subtract mean, divide by standard deviation), ignore the last two features
+        x_np = x.numpy()
+        eps = 1e-8
+        x_np[:, :-2] = (x_np[:, :-2] - np.mean(x_np[:, :-2] , axis=0)) / (np.std(x_np[:, :-2] , axis=0) + eps)
+
+
+        # Convert back to tensor
+        x = torch.tensor(x_np, dtype=torch.float)
         # Check if the shape of x matches self.state_size
+
         if x.shape[1] != self.state_size:
             raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
 
