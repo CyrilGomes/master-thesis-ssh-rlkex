@@ -86,13 +86,13 @@ class GraphTraversalEnv(gym.Env):
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 13 if self.obs_is_full_graph else 11
+        self.state_size = 15 if self.obs_is_full_graph else 11
 
         self.observation_space = self._define_observation_space()
         self.visited_keys = {}
         self.nb_targets = len(self.target_nodes)
         self.nb_actions_taken = 0
-        self.node_mapping = {node: i for i, node in enumerate(self.reference_graph.nodes())}
+        self.node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
         self.inverse_node_mapping = {v: k for k, v in self.node_mapping.items()}
         self.reset()
         self.assess_target_complexity()
@@ -164,13 +164,13 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 10
+        self.TARGET_FOUND_REWARD = 4
         self.STEP_PENALTY = -0.05
         self.REVISIT_PENALTY = -0.05
         self.PROXIMITY_BONUS = 0.6
         self.NEW_NODE_BONUS = 0.1
-        self.NO_PATH_PENALTY = -10
-        self.ADDITIONAL_TARGET_MULTIPLIER = 2
+        self.NO_PATH_PENALTY = -3
+        self.ADDITIONAL_TARGET_MULTIPLIER = 1.5
 
 
     def _get_closest_target(self):
@@ -211,38 +211,6 @@ class GraphTraversalEnv(gym.Env):
         Updates the target node to the closest target node.
         """
         self.target_node = self._get_closest_target()
-
-
-    def _graph_to_data(self, graph):
-        """
-        Converts a graph to data usable by the model.
-
-        Args:
-            graph (nx.Graph): A NetworkX graph.
-
-        Returns:
-            Data: PyTorch Geometric data object.
-        """
-        # Get a mapping from old node indices to new ones
-        node_mapping = {node: i for i, node in enumerate(graph.nodes())}
-
-        # Use the node mapping to convert node indices
-        edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in graph.edges()], dtype=torch.long).t().contiguous()
-
-        x = torch.tensor([[
-            attributes['struct_size'],
-            attributes['valid_pointer_count'],
-            attributes['invalid_pointer_count'],
-            attributes['first_pointer_offset'],
-            attributes['last_pointer_offset'],
-            attributes['first_valid_pointer_offset'],
-            attributes['last_valid_pointer_offset'],
-        ] for _, attributes in graph.nodes(data=True)], dtype=torch.float)
-
-        edge_attr = torch.tensor([data['offset'] for u, v, data in graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
-        y = torch.tensor([1 if any(attributes['cat'] == 1 for _, attributes in graph.nodes(data=True)) else 0], dtype=torch.float)
-
-        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
 
     def _get_dist_to_target(self):
@@ -336,7 +304,30 @@ class GraphTraversalEnv(gym.Env):
 
         return valid_actions
 
-    def _get_action_mask(self):
+
+
+
+
+    def _get_best_action(self):
+        """
+        Gets the best action to take from the current node.
+
+        Returns:
+            int[]: The best actions to take.
+        """
+
+        neighbors = list(self.graph.successors(self.current_node))
+        has_path_neighbors = []
+        for neighbor in neighbors:
+            has_path = nx.has_path(self.graph, neighbor, self.target_node)
+            if has_path:
+                has_path_neighbors.append(neighbor)
+
+        neighbors_data_idx = [self.node_mapping[neighbor] for neighbor in has_path_neighbors]
+        return neighbors_data_idx
+
+
+    def _get_action_mask(self, supervised_prob = 0):
         """
         Creates a mask for valid actions in the action space.
 
@@ -344,6 +335,19 @@ class GraphTraversalEnv(gym.Env):
             np.array: An array representing the action mask.
         """
         valid_actions = self._get_valid_actions()
+
+
+        if np.random.rand() < supervised_prob:
+            #get the best action
+            best_actions = self._get_best_action()
+            #chech if best action is in valid actions
+            if not set(best_actions).issubset(set(valid_actions)):
+                raise ValueError(f"Best actions: {best_actions}, valid actions: {valid_actions}")
+            valid_actions = best_actions
+
+
+
+
         action_mask = np.full(len(self.node_mapping), -np.inf)  # Assuming `self.node_mapping` maps all nodes
         action_mask[valid_actions] = 0
 
@@ -530,6 +534,7 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_pointer_offset'],
             attributes['first_valid_pointer_offset'],
             attributes['last_valid_pointer_offset'],
+            attributes['visited'],
             self.visited_stack.index(node) if node in self.visited_stack else -1,
             nb_actions,
             nb_target_left,
@@ -537,6 +542,7 @@ class GraphTraversalEnv(gym.Env):
             attributes['degree_centrality'],
             0 if self.graph.out_degree(node) > 0 else 1,
             100 if node == self.current_node else 0,
+            node == self.best_root,
 
         ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
 

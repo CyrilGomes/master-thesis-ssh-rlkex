@@ -152,12 +152,12 @@ def load_graphs_from_directory(directory_path):
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e6)  # replay buffer size
+BUFFER_SIZE = int(1e7)  # replay buffer size
 BATCH_SIZE = 256         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 1e-1              # soft update of target parameters
-LR = 0.1               # learning rate
-UPDATE_EVERY = 50        # how often to update the network
+TAU = 5e-1              # soft update of target parameters
+LR = 0.001               # learning rate
+UPDATE_EVERY = 30        # how often to update the network
 
 
 
@@ -175,22 +175,24 @@ class GraphQNetwork(torch.nn.Module):
         self.norm0 = GraphNorm(num_node_features)
 
         # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, 16, edge_dim=num_edge_features)
-        self.norm1 = GraphNorm(16)
-        self.conv2 = GATv2Conv(16, 16, edge_dim=num_edge_features)
-        self.norm2 = GraphNorm(16)
+        self.conv1 = GATv2Conv(num_node_features, 8, edge_dim=num_edge_features)
+        self.norm1 = GraphNorm(8)
+        self.conv2 = GATv2Conv(8, 6, edge_dim=num_edge_features)
+        self.norm2 = GraphNorm(6)
+        self.conv3 = GATv2Conv(6, 4, edge_dim=num_edge_features)
+        self.norm3 = GraphNorm(4)
 
 
-        self.pooling = GraphMultisetTransformer(16*2, k=10, heads=4)
+        self.pooling = GraphMultisetTransformer(8+6+4, k=8, heads=6)
 
         # Define dropout
         self.dropout = torch.nn.Dropout(p=0.5)
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(16*2, 16)
-        self.value = torch.nn.Linear(16, 1)
-        self.advantage_stream = torch.nn.Linear(16, 16)
-        self.advantage = torch.nn.Linear(16, 1)
+        self.value_stream = torch.nn.Linear(8+6+4, 8)
+        self.value = torch.nn.Linear(8, 1)
+        self.advantage_stream = torch.nn.Linear(8+6+4 ,8)
+        self.advantage = torch.nn.Linear(8, 1)
 
     def forward(self, x, edge_index, edge_attr, batch, action_mask=None):    
         #ensure everything is on device
@@ -199,23 +201,19 @@ class GraphQNetwork(torch.nn.Module):
         edge_attr = edge_attr.to(device)
         if batch is not None:
             batch = batch.to(device)
-        if action_mask is not None:
-            action_mask = action_mask.to(device)
 
-
-        
 
         # Process with GAT layers
         x1 = F.relu(self.norm1(self.conv1(x, edge_index, edge_attr)))
         
-        x = F.relu(self.norm2(self.conv2(x1, edge_index, edge_attr)))
+        x2 = F.relu(self.norm2(self.conv2(x1, edge_index, edge_attr)))
 
-        x_conc = torch.cat([x1, x], dim=-1)
+        x3 = F.relu(self.norm3(self.conv3(x2, edge_index, edge_attr)))
 
+        x_conc = torch.cat([x1, x2, x3], dim=-1)
         # Compute node-level advantage
-        advantage = F.relu(self.advantage_stream(x))
+        advantage = F.relu(self.advantage_stream(x_conc))
         advantage = self.advantage(advantage).squeeze(-1)  # Remove last dimension
-        
         
         pooled_x = self.pooling(x_conc, batch)
 
@@ -223,7 +221,7 @@ class GraphQNetwork(torch.nn.Module):
         value = self.value(value).squeeze(-1)  # Remove last dimension
         # Expand value to match the number of nodes
         if batch is None:
-            expanded_value = value.repeat(x.size(0))
+            expanded_value = value.repeat(x_conc.size(0))
         else:
             expanded_value = value.repeat_interleave(batch.bincount())
         # Combine value and advantage streams
@@ -275,6 +273,8 @@ class Agent:
 
         self.max_priority = 1.0  # Initial max priority for new experiences
 
+
+
     def add_experience(self, state, action, reward, next_state, done, action_mask, next_action_mask, priority):        
         """Add a new experience to memory."""
         e = self.experience(state, action, reward, next_state, done, action_mask, next_action_mask, priority)
@@ -304,7 +304,7 @@ class Agent:
         
 
         # Save experience in replay memory
-        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask, self.max_priority)
+        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask, self.max_priority**0.7)
         
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % UPDATE_EVERY
@@ -335,7 +335,24 @@ class Agent:
             return selected_action
         else:
             return random.choice((action_mask.cpu() == 0).nonzero(as_tuple=True)[0]).item()
-        
+    
+    def save_checkpoint(self, filename):
+        checkpoint = {
+            'qnetwork_local_state_dict': self.qnetwork_local.state_dict(),
+            'qnetwork_target_state_dict': self.qnetwork_target.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'memory': self.memory,  # Optional: save replay memory
+            'steps': self.steps  # Optional: save training steps
+        }
+        torch.save(checkpoint, filename)
+
+    def load_checkpoint(self, filename):
+        checkpoint = torch.load(filename)
+        self.qnetwork_local.load_state_dict(checkpoint['qnetwork_local_state_dict'])
+        self.qnetwork_target.load_state_dict(checkpoint['qnetwork_target_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.memory = checkpoint.get('memory', self.memory)  # Load memory if saved
+        self.steps = checkpoint.get('steps', self.steps)  # Load steps if saved
 
     def learn(self, experiences, indices, gamma):
         states, actions, rewards, next_states, dones, action_masks, next_action_masks = experiences
@@ -359,7 +376,7 @@ class Agent:
             data_list.append(data)
 
         # Create a DataLoader for batching
-        batch_size = 256
+        batch_size = BATCH_SIZE
         data_loader = DataLoader(data_list, batch_size=batch_size, shuffle=True)
 
         for batch in data_loader:
@@ -402,7 +419,8 @@ class Agent:
             # Update priorities, losses for logging, etc.
             td_errors = abs(Q_expected - Q_targets).detach().cpu()
             for i, td_error in enumerate(td_errors):
-                memory_idx = indices[i]  # Get the original index in the memory
+
+                memory_idx = b_exp_indices[i]  # Get the original index in the memory
                 self.update_priority(memory_idx, td_error.item())
 
             self.losses.append(loss.item())
@@ -425,7 +443,6 @@ class Agent:
             # Prioritized sampling logic
             experiences = [exp for _, _, exp in self.memory]
             priorities = np.array([exp.priority for exp in experiences])
-
             sum_priorities = priorities.sum()
             if sum_priorities <= 1e-5:
                 probabilities = np.full(len(experiences), 1.0 / len(experiences))
@@ -465,7 +482,7 @@ class Agent:
 # Load and preprocess graph
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 13
+STATE_SPACE = 15
 EDGE_ATTR_SIZE = 1
 
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0)
@@ -496,7 +513,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 1000 * num_episode_multiplier if training else 2
+    num_episodes = 100 * num_episode_multiplier if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -507,6 +524,8 @@ def execute_for_graph(file, training = True):
     #find the factor to which I have to multiply curr_eps such that at the end of the training it is 0.05
     
     curr_eps = 0.99
+
+    
     for episode in range_episode:
         observation = env.reset()
         episode_reward = 0
@@ -521,8 +540,9 @@ def execute_for_graph(file, training = True):
         curr_eps =    (0.99) * (1 - episode / num_episodes) if training else 0
         curr_episode_rewards = []
         done = False
+
         while not done:
-            action_mask = env._get_action_mask()
+            action_mask = env._get_action_mask(0.3)
             action = agent.act(observation, curr_eps, action_mask)
             new_observation, reward, done, info = env.step(action)
             next_action_mask = env._get_action_mask()

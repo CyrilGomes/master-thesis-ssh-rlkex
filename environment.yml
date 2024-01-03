@@ -1,0 +1,23 @@
+name: PhD-Track
+channels:
+  - defaults
+dependencies:
+  - python=3.9
+  - matplotlib==3.5.1
+  - networkx
+  - scipy
+  - plotly
+  - pygraphviz
+  - pyg
+  - torchvision
+  - pytorch
+  - pytorch-cuda=11.7
+  - torchaudio
+  - ipykernel
+  - graphistry
+  - seaborn
+  - gym
+  - stable-baselines3
+  - numba
+  - tensorboard
+prefix: /home/cyril/anaconda3/envs/PhD-Track
