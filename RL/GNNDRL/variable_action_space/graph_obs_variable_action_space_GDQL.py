@@ -14,7 +14,7 @@ import torch_geometric
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 
-from rl_base.rl_environment_key_detect_single_state import GraphTraversalEnv
+from rl_env_graph_obs_variable_action_space import GraphTraversalEnv
 from collections import deque
 import numpy as np
 import random
@@ -25,8 +25,7 @@ from collections import namedtuple, deque
 #import range tqdm
 from tqdm import tqdm
 from tqdm import trange
-from torch_geometric.data import Batch
-from torch_geometric.data import DataLoader, Batch
+from torch_geometric.loader import DataLoader
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, global_mean_pool
 
@@ -42,11 +41,33 @@ import time
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import matplotlib.pyplot as plt
 
-
+torch.autograd.set_detect_anomaly(True)
 
 # -------------------------
 # GRAPH PROCESSING
 # -------------------------
+
+class MyGraphData(Data):
+    def __init__(self, x=None, edge_index=None, edge_attr=None, action=None, reward=None,
+                 next_x=None, next_edge_index=None, next_edge_attr=None, done=None,
+                 action_mask=None, next_action_mask=None, exp_index=None):
+        super(MyGraphData, self).__init__()
+
+        # Node features (x) and edge information (edge_index, edge_attr)
+        self.x = x
+        self.edge_index = edge_index
+        self.edge_attr = edge_attr
+
+        # Additional attributes for RL experiences
+        self.action = action
+        self.reward = reward
+        self.next_x = next_x
+        self.next_edge_index = next_edge_index
+        self.next_edge_attr = next_edge_attr
+        self.done = done
+        self.action_mask = action_mask
+        self.next_action_mask = next_action_mask
+        self.exp_index = exp_index
 
 
 def connect_components(graph):
@@ -127,177 +148,126 @@ def load_graphs_from_directory(directory_path):
     graphs = [nx.read_graphml(os.path.join(directory_path, f)) for f in graph_files]
     return [preprocess_graph(g) for g in graphs]
 
-def graph_to_data(graph):
-    x = torch.tensor([[
-        attributes['struct_size'],
-        attributes['valid_pointer_count'],
-        attributes['invalid_pointer_count'],
-        attributes['first_pointer_offset'],
-        attributes['last_pointer_offset'],
-        attributes['first_valid_pointer_offset'],
-        attributes['last_valid_pointer_offset'],
-        attributes['visited']
-    ] for _, attributes in graph.nodes(data=True)], dtype=torch.float)
-    
-    edge_index = torch.tensor(list(graph.edges), dtype=torch.long).t().contiguous()
-    edge_attr = torch.tensor([graph[u][v]['offset'] for u, v in graph.edges], dtype=torch.float).unsqueeze(1)
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-
 
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e8)  # replay buffer size
-BATCH_SIZE = 512         # batch size
+BUFFER_SIZE = int(1e6)  # replay buffer size
+BATCH_SIZE = 256         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 1e-3              # soft update of target parameters
-LR = 5e-3               # learning rate
-UPDATE_EVERY = 100        # how often to update the network
+TAU = 1e-1              # soft update of target parameters
+LR = 0.1               # learning rate
+UPDATE_EVERY = 50        # how often to update the network
 
 
 
 # -------------------------
 # MODEL DEFINITION
 # -------------------------
+
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import GATv2Conv, GraphNorm, global_mean_pool, GraphMultisetTransformer
 class GraphQNetwork(torch.nn.Module):
-    def __init__(self, num_node_features, num_edge_features, action_size, seed):
+    def __init__(self, num_node_features, num_edge_features, seed):
         super(GraphQNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
+        self.norm0 = GraphNorm(num_node_features)
 
         # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, 32, edge_dim=num_edge_features)
-        self.conv2 = GATv2Conv(32, 64, edge_dim=num_edge_features)
-        self.conv3 = GATv2Conv(64, 128, edge_dim=num_edge_features)
+        self.conv1 = GATv2Conv(num_node_features, 16, edge_dim=num_edge_features)
+        self.norm1 = GraphNorm(16)
+        self.conv2 = GATv2Conv(16, 16, edge_dim=num_edge_features)
+        self.norm2 = GraphNorm(16)
+
+
+        self.pooling = GraphMultisetTransformer(16*2, k=10, heads=4)
 
         # Define dropout
         self.dropout = torch.nn.Dropout(p=0.5)
 
-        # Define Dueling DQN layers
-        self.value_stream = torch.nn.Linear(128, 64)
-        self.value = torch.nn.Linear(64, 1)
-        self.advantage_stream = torch.nn.Linear(128, 64)
-        self.advantage = torch.nn.Linear(64, action_size)
+        # Dueling DQN layers
+        self.value_stream = torch.nn.Linear(16*2, 16)
+        self.value = torch.nn.Linear(16, 1)
+        self.advantage_stream = torch.nn.Linear(16, 16)
+        self.advantage = torch.nn.Linear(16, 1)
 
-    def forward(self, data, action_mask=None):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+    def forward(self, x, edge_index, edge_attr, batch, action_mask=None):    
+        #ensure everything is on device
+        x = x.to(device)
+        edge_index = edge_index.to(device)
+        edge_attr = edge_attr.to(device)
+        if batch is not None:
+            batch = batch.to(device)
+        if action_mask is not None:
+            action_mask = action_mask.to(device)
 
-        x = F.relu(self.conv1(x, edge_index, edge_attr))
-        x = self.dropout(x, training=self.training)
-        x = F.relu(self.conv2(x, edge_index, edge_attr))
-        x = self.dropout(x, training=self.training)
-        x = F.relu(self.conv3(x, edge_index, edge_attr))
 
-        x = global_mean_pool(x, data.batch)
+        
 
-        # Compute value and advantage streams
-        value = F.relu(self.value_stream(x))
-        value = self.value(value)
+        # Process with GAT layers
+        x1 = F.relu(self.norm1(self.conv1(x, edge_index, edge_attr)))
+        
+        x = F.relu(self.norm2(self.conv2(x1, edge_index, edge_attr)))
+
+        x_conc = torch.cat([x1, x], dim=-1)
+
+        # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x))
-        advantage = self.advantage(advantage)
+        advantage = self.advantage(advantage).squeeze(-1)  # Remove last dimension
+        
+        
+        pooled_x = self.pooling(x_conc, batch)
 
-        qvals = value + (advantage - advantage.mean(dim=1, keepdim=True))
-
-        if action_mask is not None:
-            action_mask = action_mask.to(qvals.device)
-            qvals += action_mask
-
-        return qvals
-    
-
-
-
-import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv, global_mean_pool
-from torch_scatter import scatter_mean
-
-class AdvancedGraphQNetwork(torch.nn.Module):
-    def __init__(self, num_node_features, num_edge_features, action_size, seed):
-        super(AdvancedGraphQNetwork, self).__init__()
-        self.seed = torch.manual_seed(seed)
-
-        # GAT Layers
-        self.conv1 = GATv2Conv(num_node_features, 32, edge_dim=num_edge_features)
-        self.conv2 = GATv2Conv(32, 64, edge_dim=num_edge_features)
-        self.conv3 = GATv2Conv(64, 128, edge_dim=num_edge_features)
-
-        # Dropout
-        self.dropout = torch.nn.Dropout(p=0.5)
-
-        # Fully Connected Layers
-        self.value_stream = torch.nn.Linear(128 * 3, 64)  # Adjusted for combined features size
-        self.value = torch.nn.Linear(64, 1)
-        self.advantage_stream = torch.nn.Linear(128 * 3, 64)
-        self.advantage = torch.nn.Linear(64, action_size)
-
-    def forward(self, data, current_node_idx, action_mask=None):
-        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-
-        # GNN layers
-        x = F.relu(self.conv1(x, edge_index, edge_attr))
-        x = self.dropout(x)
-        x = F.relu(self.conv2(x, edge_index, edge_attr))
-        x = self.dropout(x)
-        x = F.relu(self.conv3(x, edge_index, edge_attr))
-        x = self.dropout(x)
-
-        # Global feature pooling
-        global_features = global_mean_pool(x, data.batch)
-
-        # Extract features of the current node
-        current_node_features = x[current_node_idx, :]
-
-        # Find neighbors (alternative approach)
-        src, dest = edge_index
-        mask = (src == current_node_idx) | (dest == current_node_idx)
-        neighbors = torch.cat((src[mask], dest[mask])).unique()
-        neighbors = neighbors[neighbors != current_node_idx]  # Exclude the current node
-
-        # Aggregate neighbor features
-        if neighbors.numel() > 0:
-            neighbor_features = scatter_mean(x[neighbors], neighbors, dim=0, dim_size=x.size(0))
+        value = self.value_stream(pooled_x)
+        value = self.value(value).squeeze(-1)  # Remove last dimension
+        # Expand value to match the number of nodes
+        if batch is None:
+            expanded_value = value.repeat(x.size(0))
         else:
-            neighbor_features = torch.zeros_like(current_node_features)
+            expanded_value = value.repeat_interleave(batch.bincount())
+        # Combine value and advantage streams
+        qvals = expanded_value + advantage
 
-        # Combine local and global features
-        combined_features = torch.cat((global_features, current_node_features, neighbor_features), dim=1)
-
-        print(combined_features.shape)
-        # Compute value and advantage streams
-        value = F.relu(self.value_stream(combined_features))
-        value = self.value(value)
-        advantage = F.relu(self.advantage_stream(combined_features))
-        advantage = self.advantage(advantage)
-
-        qvals = value + (advantage - advantage.mean(dim=1, keepdim=True))
-
+        # Apply action mask if provided
         if action_mask is not None:
             action_mask = action_mask.to(qvals.device)
-            qvals += action_mask
+            # Set Q-values of valid actions (where action_mask is 0) as is, and others to -inf
+            qvals = torch.where(action_mask == 0, qvals, torch.tensor(float('-1e8')).to(qvals.device))
+
+
+        #check if qvals contains nan
+        if torch.isnan(qvals).any():
+            raise ValueError("Qvals contains nan")
 
         return qvals
+
+
+
+
 
 
 # -------------------------
 # AGENT DEFINITION
 # -------------------------
 class Agent:
-    def __init__(self, state_size, edge_attr_size,  action_size, seed):
-        self.writer = SummaryWriter('runs/DQL_FULL_GRAPH')  # Choose an appropriate experiment name
-
+    def __init__(self, state_size, edge_attr_size, seed, use_prioritized_replay=True):
+        self.writer = SummaryWriter('runs/DQL_GRAPH_VARIABLE_ACTION_SPACE')  # Choose an appropriate experiment name
+        self.use_prioritized_replay = use_prioritized_replay  # Flag to use prioritized replay
         self.state_size = state_size
-        self.action_size = action_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
 
         # Q-Network
-        self.qnetwork_local = AdvancedGraphQNetwork(state_size, self.edge_attr_size, action_size, seed).to(device)
-        self.qnetwork_target = AdvancedGraphQNetwork(state_size, self.edge_attr_size, action_size,seed).to(device)
+        self.qnetwork_local = GraphQNetwork(state_size, self.edge_attr_size, seed).to(device)
+        self.qnetwork_target = GraphQNetwork(state_size, self.edge_attr_size,seed).to(device)
+
+
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=LR)
         self.memory_counter = 0  # Counter to track the number of experiences added
         # Replay memory
         self.memory = []
-        self.experience = namedtuple("Experience", field_names=["state","current_node_idxs", "action", "reward", "next_state","next_node_idx", "done", "action_mask", "next_action_mask", "priority"])
+        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask", "next_action_mask", "priority"])
         self.t_step = 0
 
         self.losses = []
@@ -305,9 +275,9 @@ class Agent:
 
         self.max_priority = 1.0  # Initial max priority for new experiences
 
-    def add_experience(self, state, current_node_idx, action, reward, next_state, next_node_idx, done, action_mask, next_action_mask, priority):        
+    def add_experience(self, state, action, reward, next_state, done, action_mask, next_action_mask, priority):        
         """Add a new experience to memory."""
-        e = self.experience(state, current_node_idx, action, reward, next_state, done, action_mask, next_action_mask, priority)
+        e = self.experience(state, action, reward, next_state, done, action_mask, next_action_mask, priority)
         heapq.heappush(self.memory, (-priority, self.memory_counter, e))  # Use priority and counter
         self.memory_counter += 1  # Increment counter
 
@@ -326,111 +296,163 @@ class Agent:
 
 
 
-    def step(self, state, current_node_idx, action, reward, next_state, next_node_idx, done, action_mask=None, next_action_mask=None):
+    def step(self, state, action, reward, next_state, done, action_mask=None, next_action_mask=None):
         self.steps += 1
         #ensure everything is on device
-        state = state.to(device)
-        next_state = next_state.to(device)
+        state = state
+        next_state = next_state
         
-        current_node_idx = torch.tensor([current_node_idx], dtype=torch.long).to(device)
-        next_node_idx = torch.tensor([next_node_idx], dtype=torch.long).to(device)
 
         # Save experience in replay memory
-        self.add_experience(state, current_node_idx, action, reward, next_state, next_node_idx, done, action_mask, next_action_mask, self.max_priority)
+        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask, self.max_priority)
         
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % UPDATE_EVERY
         if self.t_step == 0:
             if len(self.memory) > BATCH_SIZE:
-                experiences = self.sample()
-                self.learn(experiences, GAMMA)
+                experiences, indices = self.sample()
+                self.learn(experiences, indices, GAMMA)
 
-    def act(self, state, current_node_idx,  eps=0, action_mask=None):
-        state = state.to(device)
-        self.qnetwork_local.eval()
-        current_node_idx = torch.tensor([current_node_idx], dtype=torch.long).to(device)  # Convert current_node_idx to tensor
-        action_mask = torch.from_numpy(action_mask).to(device)
+    def act(self, state, eps=0, action_mask=None):
+        state = state
+        action_mask = torch.from_numpy(action_mask)
 
-        with torch.no_grad():
-            action_values = self.qnetwork_local(state, current_node_idx, action_mask)
-        self.qnetwork_local.train()
-
-        # Epsilon-greedy action selection
         if random.random() > eps:
-            return torch.argmax(action_values.cpu()).item()
+            self.qnetwork_local.eval()
+            x = state.x
+            edge_index = state.edge_index
+            edge_attr = state.edge_attr
+            batch = state.batch
+
+            with torch.no_grad():  # Wrap in no_grad
+                action_values = self.qnetwork_local(x, edge_index, edge_attr, batch, action_mask)
+            return_values = action_values.cpu()
+            self.qnetwork_local.train()
+
+            selected_action = torch.argmax(return_values).item()
+            torch.cuda.empty_cache()
+
+            return selected_action
         else:
-            return random.choice((action_mask.cpu() == 0).nonzero(as_tuple=True)[0]).item()  # Select from valid actions only
+            return random.choice((action_mask.cpu() == 0).nonzero(as_tuple=True)[0]).item()
+        
 
-    def learn(self, experiences, gamma):
-        states, current_node_idxs, actions, rewards, next_states, next_node_idxs, dones, action_masks, next_action_masks = experiences
-        # DDQN
-        indices = self.qnetwork_local(next_states, next_node_idxs, next_action_masks).detach().argmax(1).unsqueeze(1)
-        Q_targets_next = self.qnetwork_target(next_states,next_node_idxs, next_action_masks).detach().gather(1, indices)
-        Q_targets_next[Q_targets_next == float('-inf')] = -1e9  # Replace -inf with a large negative value
+    def learn(self, experiences, indices, gamma):
+        states, actions, rewards, next_states, dones, action_masks, next_action_masks = experiences
 
-        # Reshape rewards and dones to be column vectors
-        rewards = rewards.unsqueeze(1)
-        dones = dones.unsqueeze(1)
+        # Create a list of Data objects, each representing a graph experience
+        data_list = []
+        for i in range(len(states)):
+            state = states[i]  # Assuming states are Data objects
+            action = actions[i]
+            reward = rewards[i]
+            next_state = next_states[i]
+            done = dones[i]
+            action_mask = torch.from_numpy(action_masks[i])
+            next_action_mask = torch.from_numpy(next_action_masks[i])
+            exp_index = indices[i]
 
-        # Compute Q targets for current states
-        Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
+            data = MyGraphData(x=state.x, edge_index=state.edge_index, edge_attr=state.edge_attr,
+                            action=action, reward=reward, next_x=next_state.x,
+                            next_edge_index=next_state.edge_index, next_edge_attr=next_state.edge_attr,
+                            done=done, action_mask=action_mask, next_action_mask=next_action_mask, exp_index=exp_index)
+            data_list.append(data)
 
-        # Get expected Q values from local model
-        Q_expected = self.qnetwork_local(states,current_node_idxs, action_masks).gather(1, actions)
-        # Update priorities
-        with torch.no_grad():
-            new_priorities = abs(Q_expected - Q_targets) + 1e-5  # Small offset to ensure no experience has zero priority
-            max_priority = new_priorities.max().item()
-            self.max_priority = max(max_priority, self.max_priority)
+        # Create a DataLoader for batching
+        batch_size = 256
+        data_loader = DataLoader(data_list, batch_size=batch_size, shuffle=True)
 
+        for batch in data_loader:
+            batch.to(device)  # Send the batch to the GPU if available
+            b_exp_indices = batch.exp_index
+            # Extract batched action, reward, done, and action_mask
+            b_action = batch.action.to(device)
+            b_reward = batch.reward.to(device)
+            b_done = batch.done.to(device)
+            b_action_mask = None#batch.action_mask.to(device)
+            b_next_action_mask = None#batch.next_action_mask.to(device)
 
-        # Compute loss
-        loss = F.mse_loss(Q_expected, Q_targets)
-        self.losses.append(loss.item())
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+            # DDQN Update for the individual graph
+            self.qnetwork_local.eval()
 
-        # Soft update target network
-        self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
+            # Calculate Q values for next states
+            with torch.no_grad():
+                Q_targets_next = self.qnetwork_target(batch.next_x, batch.next_edge_index, 
+                                                    batch.next_edge_attr, batch.batch, 
+                                                    action_mask=b_next_action_mask).detach().max(0)[0].unsqueeze(0)
+                Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
 
+            # Get expected Q values from local model
+            Q_expected = self.qnetwork_local(batch.x, batch.edge_index, 
+                                            batch.edge_attr, batch.batch, 
+                                            action_mask=b_action_mask).gather(0, b_action)
 
+            # Compute loss
+            loss = F.mse_loss(Q_expected, Q_targets)
+
+            # Backpropagation
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+
+            torch.cuda.empty_cache()
+            # Soft update target network
+            self.soft_update(self.qnetwork_local, self.qnetwork_target, TAU)
+
+            # Update priorities, losses for logging, etc.
+            td_errors = abs(Q_expected - Q_targets).detach().cpu()
+            for i, td_error in enumerate(td_errors):
+                memory_idx = indices[i]  # Get the original index in the memory
+                self.update_priority(memory_idx, td_error.item())
+
+            self.losses.append(loss.item())
+
+    def update_priority(self, idx, new_priority):
+        if self.use_prioritized_replay:
+            # Update the priority of the experience at idx in memory
+            _, counter, experience = self.memory[idx]
+            self.memory[idx] = (-new_priority, counter, experience)
+            # Optionally update the max priority
+            self.max_priority = max(self.max_priority, new_priority)
 
     def soft_update(self, local_model, target_model, tau):
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
 
     def sample(self):
-        """Sample a batch of experiences from memory based on priority."""
-        # Create a list from the priority queue
-        experiences = [exp for _, _, exp in self.memory]  # Adjusted for 3-tuple
-        # Extract priorities
-        priorities = np.array([exp.priority for exp in experiences])
-        
-        # Convert priorities to probabilities
-        probabilities = priorities / priorities.sum()
-        
-        # Sample experiences based on probabilities
-        sampled_indices = np.random.choice(len(experiences), size=BATCH_SIZE, p=probabilities)
-        sampled_experiences = [experiences[i] for i in sampled_indices]
+        """Sample a batch of experiences from memory."""
+        if self.use_prioritized_replay:
+            # Prioritized sampling logic
+            experiences = [exp for _, _, exp in self.memory]
+            priorities = np.array([exp.priority for exp in experiences])
 
-        states = Batch.from_data_list([e.state for e in sampled_experiences if e is not None]).to(device)
-        
-        actions = torch.tensor([e.action for e in sampled_experiences if e is not None], dtype=torch.long).unsqueeze(-1).to(device)
-        rewards = torch.tensor([e.reward for e in sampled_experiences if e is not None]).to(device)
+            sum_priorities = priorities.sum()
+            if sum_priorities <= 1e-5:
+                probabilities = np.full(len(experiences), 1.0 / len(experiences))
+            else:
+                probabilities = priorities / sum_priorities
+
+            sampled_indices = np.random.choice(len(experiences), size=BATCH_SIZE, p=probabilities)
+        else:
+            # Uniform sampling logic
+            sampled_indices = np.random.choice(len(self.memory), size=min(BATCH_SIZE, len(self.memory)), replace=False)
+
+        sampled_experiences = [self.memory[i][2] for i in sampled_indices]  # Adjust indexing if necessary
+
+
+        states = [e.state for e in sampled_experiences if e is not None]
+        actions = torch.tensor([e.action for e in sampled_experiences if e is not None], dtype=torch.long).unsqueeze(-1)
+        rewards = torch.tensor([e.reward for e in sampled_experiences if e is not None])
         
         # You should handle next_states in the same manner as states, given that it also contains graph data
-        next_states = Batch.from_data_list([e.next_state for e in sampled_experiences if e is not None]).to(device)
+        next_states = [e.next_state for e in sampled_experiences if e is not None]
         
-        dones = torch.tensor([torch.tensor(e.done, dtype=torch.uint8) for e in sampled_experiences if e is not None]).to(device).float()
+        dones = torch.tensor([torch.tensor(e.done, dtype=torch.uint8) for e in sampled_experiences if e is not None]).float()
         # Convert the list of numpy arrays to a single numpy array before converting to a tensor
-        action_masks = torch.tensor(np.array([e.action_mask for e in sampled_experiences if e is not None])).to(device)
-        next_action_masks = torch.tensor(np.array([e.next_action_mask for e in sampled_experiences if e is not None])).to(device)
+        action_masks = [e.action_mask for e in sampled_experiences if e is not None]
+        next_action_masks = [e.next_action_mask for e in sampled_experiences if e is not None]
 
-        current_node_idxs = torch.tensor([e.current_node_idx for e in sampled_experiences if e is not None], dtype=torch.long).to(device)
-        next_node_idxs = torch.tensor([e.next_node_idx for e in sampled_experiences if e is not None], dtype=torch.long).to(device)
-
-        return (states, current_node_idxs, actions, rewards, next_states, next_node_idxs, dones, action_masks, next_action_masks)
+        return (states, actions, rewards, next_states, dones, action_masks, next_action_masks), sampled_indices
 
 
 
@@ -443,11 +465,10 @@ class Agent:
 # Load and preprocess graph
 
 FOLDER = "Generated_Graphs/output/"
-ACTION_SPACE = 50
 STATE_SPACE = 13
 EDGE_ATTR_SIZE = 1
 
-agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE,  ACTION_SPACE, seed=0)
+agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0)
 
 
 INIT_EPS = 0.98
@@ -455,9 +476,7 @@ EPS_DECAY = 0.99991
 
 
 def check_parameters(env):
-    #check if state space and action space are correct
-    if env.action_space.n != ACTION_SPACE:
-        raise ValueError("Action space is not correct")
+
     if env.observation_space.spaces['x'].shape[0] != STATE_SPACE:
         raise ValueError("State space is not correct")
     
@@ -489,7 +508,7 @@ def execute_for_graph(file, training = True):
     
     curr_eps = 0.99
     for episode in range_episode:
-        observation, current_node_idx = env.reset()
+        observation = env.reset()
         episode_reward = 0
         episode_stats = {"nb_of_moves": 0,
                          "nb_key_found": 0,
@@ -504,19 +523,18 @@ def execute_for_graph(file, training = True):
         done = False
         while not done:
             action_mask = env._get_action_mask()
-            action = agent.act(observation, current_node_idx, curr_eps, action_mask)
-            new_observation, new_current_node_idx, reward, done, info = env.step(action)
+            action = agent.act(observation, curr_eps, action_mask)
+            new_observation, reward, done, info = env.step(action)
             next_action_mask = env._get_action_mask()
             curr_episode_rewards.append(reward)
             if training:
 
-                agent.step(observation, current_node_idx, action, reward, new_observation, new_current_node_idx, done, action_mask, next_action_mask)
+                agent.step(observation, action, reward, new_observation, done, action_mask, next_action_mask)
 
             episode_stats["nb_of_moves"] += 1
             
             if done:
                 episode_stats["nb_key_found"] = info["nb_keys_found"]
-                episode_stats["nb_possible_keys"] = info["nb_possible_keys"]
                 max_key_found = max(max_key_found, info["nb_keys_found"])
                 if info["found_target"]:
                     stats["nb_success"] += 1
@@ -525,7 +543,6 @@ def execute_for_graph(file, training = True):
                 break
             
             observation = new_observation
-            current_node_idx = new_current_node_idx
         
         episode_reward = np.sum(curr_episode_rewards)
         """
