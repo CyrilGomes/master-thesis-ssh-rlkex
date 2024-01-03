@@ -189,7 +189,7 @@ class GraphQNetwork(torch.nn.Module):
         self.dropout = torch.nn.Dropout(p=0.5)
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(8+6+4, 8)
+        self.value_stream = torch.nn.Linear(36, 8)
         self.value = torch.nn.Linear(8, 1)
         self.advantage_stream = torch.nn.Linear(8+6+4 ,8)
         self.advantage = torch.nn.Linear(8, 1)
@@ -213,19 +213,26 @@ class GraphQNetwork(torch.nn.Module):
         x_conc = torch.cat([x1, x2, x3], dim=-1)
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x_conc))
+
         advantage = self.advantage(advantage).squeeze(-1)  # Remove last dimension
         
-        pooled_x = self.pooling(x_conc, batch)
+        pooled_global = self.pooling(x_conc, batch)
+        # Reshape pooled_global to match x_conc's dimensions
+        pooled_global_batch =  pooled_global.squeeze().repeat(x_conc.size(0), 1) if batch is None else pooled_global[batch]
 
-        value = self.value_stream(pooled_x)
+        combined_features = torch.cat([pooled_global_batch, x_conc], dim=-1)  # Combine global and local features
+        value = F.relu(self.value_stream(combined_features))
         value = self.value(value).squeeze(-1)  # Remove last dimension
-        # Expand value to match the number of nodes
-        if batch is None:
-            expanded_value = value.repeat(x_conc.size(0))
-        else:
-            expanded_value = value.repeat_interleave(batch.bincount())
+
         # Combine value and advantage streams
-        qvals = expanded_value + advantage
+            
+        # Calculate the mean advantage for each graph in the batch
+        mean_advantage = global_mean_pool(advantage, batch)
+
+        # Expand mean advantage to match the number of nodes
+        expanded_mean_advantage = mean_advantage[batch]
+
+        qvals = value + (advantage - expanded_mean_advantage)
 
         # Apply action mask if provided
         if action_mask is not None:
@@ -304,7 +311,7 @@ class Agent:
         
 
         # Save experience in replay memory
-        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask, self.max_priority**0.7)
+        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask, self.max_priority*0.8)
         
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % UPDATE_EVERY
@@ -513,7 +520,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 100 * num_episode_multiplier if training else 2
+    num_episodes = 200 * num_episode_multiplier if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -542,7 +549,7 @@ def execute_for_graph(file, training = True):
         done = False
 
         while not done:
-            action_mask = env._get_action_mask(0.3)
+            action_mask = env._get_action_mask()
             action = agent.act(observation, curr_eps, action_mask)
             new_observation, reward, done, info = env.step(action)
             next_action_mask = env._get_action_mask()
