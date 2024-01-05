@@ -13,6 +13,7 @@ import keyboard
 import torch_geometric
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
+from torch_scatter import scatter_max
 
 from rl_env_graph_obs_variable_action_space import GraphTraversalEnv
 from collections import deque
@@ -48,26 +49,26 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 
 class MyGraphData(Data):
-    def __init__(self, x=None, edge_index=None, edge_attr=None, action=None, reward=None,
-                 next_x=None, next_edge_index=None, next_edge_attr=None, done=None,
-                 action_mask=None, next_action_mask=None, exp_index=None):
-        super(MyGraphData, self).__init__()
 
-        # Node features (x) and edge information (edge_index, edge_attr)
-        self.x = x
-        self.edge_index = edge_index
-        self.edge_attr = edge_attr
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == 'edge_index_s':
+            return self.x_s.size(0)
+        if key == 'edge_index_t':
+            return self.x_t.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
+    
+    def __cat_dim__(self, key, value, *args, **kwargs):
+        if key == 'action':
+            return None
+        if key == 'reward':
+            return None
+        if key == 'done':
+            return None
+        if key == 'exp_index':
+            return None
 
-        # Additional attributes for RL experiences
-        self.action = action
-        self.reward = reward
-        self.next_x = next_x
-        self.next_edge_index = next_edge_index
-        self.next_edge_attr = next_edge_attr
-        self.done = done
-        self.action_mask = action_mask
-        self.next_action_mask = next_action_mask
-        self.exp_index = exp_index
+        
+        return super().__cat_dim__(key, value, *args, **kwargs)
 
 
 def connect_components(graph):
@@ -213,9 +214,8 @@ class GraphQNetwork(torch.nn.Module):
         x_conc = torch.cat([x1, x2, x3], dim=-1)
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x_conc))
-
         advantage = self.advantage(advantage).squeeze(-1)  # Remove last dimension
-        
+
         pooled_global = self.pooling(x_conc, batch)
         # Reshape pooled_global to match x_conc's dimensions
         pooled_global_batch =  pooled_global.squeeze().repeat(x_conc.size(0), 1) if batch is None else pooled_global[batch]
@@ -372,19 +372,17 @@ class Agent:
             reward = rewards[i]
             next_state = next_states[i]
             done = dones[i]
-            action_mask = torch.from_numpy(action_masks[i])
-            next_action_mask = torch.from_numpy(next_action_masks[i])
             exp_index = indices[i]
 
-            data = MyGraphData(x=state.x, edge_index=state.edge_index, edge_attr=state.edge_attr,
-                            action=action, reward=reward, next_x=next_state.x,
-                            next_edge_index=next_state.edge_index, next_edge_attr=next_state.edge_attr,
-                            done=done, action_mask=action_mask, next_action_mask=next_action_mask, exp_index=exp_index)
+            data = MyGraphData(x_s=state.x, edge_index_s=state.edge_index, edge_attr_s=state.edge_attr,
+                            action=action, reward=reward, x_t=next_state.x,
+                            edge_index_t=next_state.edge_index, edge_attr_t=next_state.edge_attr,
+                            done=done, exp_index=exp_index)
             data_list.append(data)
 
         # Create a DataLoader for batching
         batch_size = BATCH_SIZE
-        data_loader = DataLoader(data_list, batch_size=batch_size, shuffle=True)
+        data_loader = DataLoader(data_list, batch_size=batch_size, shuffle=True, follow_batch=['x_s', 'x_t'], pin_memory=True)
 
         for batch in data_loader:
             batch.to(device)  # Send the batch to the GPU if available
@@ -393,24 +391,59 @@ class Agent:
             b_action = batch.action.to(device)
             b_reward = batch.reward.to(device)
             b_done = batch.done.to(device)
-            b_action_mask = None#batch.action_mask.to(device)
-            b_next_action_mask = None#batch.next_action_mask.to(device)
+            b_action_mask = None
+            b_next_action_mask = None
+
+            b_x_s = batch.x_s.to(device)
+            b_edge_index_s = batch.edge_index_s.to(device)
+            b_edge_attr_s = batch.edge_attr_s.to(device)
+            b_x_t = batch.x_t.to(device)
+            b_edge_index_t = batch.edge_index_t.to(device)
+            b_edge_attr_t = batch.edge_attr_t.to(device)
+            x_s_batch = batch.x_s_batch.to(device)
+            x_t_batch = batch.x_t_batch.to(device)
 
             # DDQN Update for the individual graph
-            self.qnetwork_local.eval()
-
+            self.qnetwork_target.eval()
             # Calculate Q values for next states
             with torch.no_grad():
-                Q_targets_next = self.qnetwork_target(batch.next_x, batch.next_edge_index, 
-                                                    batch.next_edge_attr, batch.batch, 
-                                                    action_mask=b_next_action_mask).detach().max(0)[0].unsqueeze(0)
-                Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
+                Q_targets_next = self.qnetwork_target(b_x_t, b_edge_index_t, 
+                                                    b_edge_attr_t, x_t_batch, 
+                                                    action_mask=b_next_action_mask).detach().squeeze()
 
-            # Get expected Q values from local model
-            Q_expected = self.qnetwork_local(batch.x, batch.edge_index, 
-                                            batch.edge_attr, batch.batch, 
-                                            action_mask=b_action_mask).gather(0, b_action)
 
+
+            Q_targets_next_max = scatter_max(Q_targets_next, x_t_batch, dim=0)[0]
+            Q_targets = b_reward + (gamma * Q_targets_next_max * (1 - b_done))
+
+            self.qnetwork_local.train()
+            Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, batch.batch, action_mask=b_action_mask).squeeze()
+
+
+            zero_tensor = torch.tensor([0], device=x_s_batch.device)
+
+            # Ensure b_action is 1D with shape [num_graphs]
+            b_action = b_action.squeeze()
+
+            # Count the number of nodes in each graph
+            nodes_per_graph = x_s_batch.bincount()
+
+            # Calculate the start index of each graph in the concatenated batch
+            cumulative_sizes = torch.cat([torch.tensor([0], device=x_s_batch.device), nodes_per_graph.cumsum(0)[:-1]])
+
+            # Offset b_action based on the starting index of each graph
+            adjusted_b_action = b_action + cumulative_sizes
+
+            # Ensure adjusted_b_action is 1D
+            adjusted_b_action = adjusted_b_action.squeeze()
+
+
+
+            # Now gather the Q values
+            Q_expected = Q_expected_result.gather(0, adjusted_b_action)
+
+
+            
             # Compute loss
             loss = F.mse_loss(Q_expected, Q_targets)
 
@@ -525,13 +558,13 @@ def execute_for_graph(file, training = True):
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
     max_key_found = 0
-    max_posssible_key = 0
 
     #agent.log_environment_change(file)
     #find the factor to which I have to multiply curr_eps such that at the end of the training it is 0.05
     
     curr_eps = 0.99
 
+    keys_per_episode = []
     
     for episode in range_episode:
         observation = env.reset()
@@ -570,7 +603,7 @@ def execute_for_graph(file, training = True):
                 break
             
             observation = new_observation
-        
+        keys_per_episode.append(episode_stats["nb_key_found"])
         episode_reward = np.sum(curr_episode_rewards)
         """
         if episode == num_episodes - 1:
@@ -605,17 +638,20 @@ def execute_for_graph(file, training = True):
         """
         avg_reward = np.mean(episode_rewards[-10:]) if len(episode_rewards) > 0 else 0.0
 
+        key_found_ratio = episode_stats["nb_key_found"] / len(target_nodes)
+
         metrics = {
             'Average Reward': episode_reward,
             'Loss': agent.losses[-1] if len(agent.losses) > 0 else 0.0,
             'Epsilon': curr_eps,
             'MaxKeyFound' : max_key_found,
+            'KeyFoundRatio' : key_found_ratio
         }
         agent.log_metrics(metrics)
 
 
-        keys_found = episode_stats["nb_key_found"]
-        range_episode.set_description(f"MER : {max_reward:.2f} KeysFound : {max_key_found} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
+        avg_key_found = np.mean(keys_per_episode[-10:]) if len(keys_per_episode) > 0 else 0.0
+        range_episode.set_description(f"MER : {max_reward:.2f} MaxKeysFound : {max_key_found} AvgKEyFound : {avg_key_found:.2f} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
 

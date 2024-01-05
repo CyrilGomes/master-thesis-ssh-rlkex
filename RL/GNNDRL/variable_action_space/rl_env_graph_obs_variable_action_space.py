@@ -6,11 +6,13 @@ import torch
 import random 
 from torch_geometric.data import Data
 import torch_geometric.transforms as T
+
+
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 import concurrent.futures
 from numba import jit
-
+from torch_geometric.utils import to_undirected
 from root_heuristic_rf import GraphPredictor
 
 @jit(nopython=True)
@@ -89,6 +91,7 @@ class GraphTraversalEnv(gym.Env):
         self.nb_actions_taken = 0
         self.node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
         self.inverse_node_mapping = {v: k for k, v in self.node_mapping.items()}
+        self.target_node = None
         self.reset()
         self.assess_target_complexity()
 
@@ -162,7 +165,7 @@ class GraphTraversalEnv(gym.Env):
         self.TARGET_FOUND_REWARD = 10
         self.STEP_PENALTY = -0.05
         self.REVISIT_PENALTY = -0.05
-        self.PROXIMITY_BONUS = 0.6
+        self.PROXIMITY_MULTIPLIER = 1.3
         self.NEW_NODE_BONUS = 0.1
         self.NO_PATH_PENALTY = -3
         self.ADDITIONAL_TARGET_MULTIPLIER = 1.5
@@ -349,86 +352,81 @@ class GraphTraversalEnv(gym.Env):
 
 
     def _compute_distance_reward(self, targets, unreachable_penalty, normalization_factor):
-        total_reward = 0
-        distances = []
-
-        # Calculate distances and handle unreachable targets
-
-        not_found_targets = [target for target in targets if target not in self.visited_keys]
-        for target in not_found_targets:
-            distance = self._get_path_length(self.current_node, target)
-            if distance is not None:
-                distances.append(distance)
-            else:
-                total_reward += unreachable_penalty
-
-        # Normalize distances
-        if distances:
-            max_distance = max(distances)
-            normalized_distances = [d / max_distance for d in distances] if max_distance > 0 else [0] * len(distances)
-        else:
-            normalized_distances = []
-
-        # Sort normalized distances to prioritize closer targets
-        normalized_distances.sort()
-
-        # Apply scaled weights: closer targets get higher weights
-        num_targets = len(normalized_distances)
-        for i, distance in enumerate(normalized_distances):
-            weight = (num_targets - i) / num_targets  # Higher weight for closer targets
-            distance_reward = -distance * weight * normalization_factor
-            total_reward += distance_reward
-
-        return total_reward
+        #TODO : implement the distance reward
+        pass
 
 
 
-    def _has_path_to_at_least_one_target(self):
-        """
-        Determines whether there is a path from the current node to at least one target node.
-
-        Returns:
-            bool: True if there is a path, False otherwise.
-        """
-        for target in self.target_nodes:
-            #use the cached path length
-            if self._get_path_length(self.current_node, target) is not None:
-                return True
-            
-        return False
 
 
     def step(self, action):
 
+
+
         #convert the id from Data to the id from the graph
         action = self.inverse_node_mapping[action]
+        distance_to_target = {}
+        for target in self.target_nodes:
+            distance_to_target[target] = self._get_path_length(self.current_node, target)
+            
+
         self._perform_action(action)
         visit_count = self.graph.nodes[self.current_node]['visited']
 
+        
 
-        has_path = self._has_path_to_at_least_one_target()
 
-        has_found_target = self.current_node in self.target_nodes
+
+
+        #check if at least one target is reachable
+        has_path = self._get_closest_target() is not None
+
+
+        has_found_target = self.current_node in self.target_nodes and self.current_node not in self.visited_keys
         reward = compute_reward( has_found_target, visit_count, 
                    self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY, 
                     self.NEW_NODE_BONUS, self.NO_PATH_PENALTY, len(self.visited_keys), has_path)
         
-        distance_reward = self._compute_distance_reward(self.target_nodes, self.NO_PATH_PENALTY, 1)
-        reward += distance_reward
+        
+        if has_path and not has_found_target:
+
+            #remove None values
+            distance_to_target = {k: v for k, v in distance_to_target.items() if v is not None}
+            sorted_targets = sorted(distance_to_target, key=distance_to_target.get)
+            #get the closest target
+            current_closest_target = self._get_closest_target()
+
+            #safe check if the current closest target is not in the sorted targets
+            if current_closest_target not in sorted_targets:
+                raise ValueError(f"Current closest target {current_closest_target} is not in sorted targets {sorted_targets} it shouldn't be!")
+
+            #scale the reward by the index of the current closest target to the sorted targets
+            #basically giving a better reward if the index is lower
+            distance_reward = self.PROXIMITY_MULTIPLIER * (sorted_targets.index(current_closest_target) + 1) / len(sorted_targets)
+            
+            reward += distance_reward
+
+
         self.nb_actions_taken += 1
 
         is_incorect_leaf = False
         if has_found_target:
+
             #print(f"Found target {self.target_node}! reward : {reward}")
             self.visited_keys.add(self.current_node)
             obs = self._get_obs()
+            if len(self.visited_keys) == self.nb_targets:
+                #print("All targets found!")
+                reward = self.ADDITIONAL_TARGET_MULTIPLIER * self.TARGET_FOUND_REWARD * len(self.visited_keys)
+                return obs, reward, True, self._episode_info(found_target=True)
+
             self._restart_agent_from_root()
             return obs, reward, False, self._episode_info()
         elif self.graph.out_degree(self.current_node) == 0:
             is_incorect_leaf = True
 
         obs = self._get_obs()
-        done = self.visited_keys == self.nb_targets or has_path == False or is_incorect_leaf
+        done = has_path == False or is_incorect_leaf
 
         return obs, reward, done, self._episode_info()
 
@@ -522,6 +520,7 @@ class GraphTraversalEnv(gym.Env):
         self.visited_keys = set()
         self.nb_actions_taken = 0
         self.observation_space = self._define_observation_space()
+        self.target_node = self._get_closest_target()
 
         return self._get_obs()
     
@@ -609,9 +608,12 @@ class GraphTraversalEnv(gym.Env):
 
         if x.shape[1] != self.state_size:
             raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
+        
+        transform = T.Compose([T.ToUndirected()])
 
-        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        data = transform(data)
+        return data
 
     def close(self):
         pass
