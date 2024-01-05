@@ -168,7 +168,8 @@ UPDATE_EVERY = 30        # how often to update the network
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv, GraphNorm, global_mean_pool, GraphMultisetTransformer
+from torch_geometric.nn import GATv2Conv, GraphNorm, dense_diff_pool, DenseSAGEConv
+from torch_geometric.utils import to_dense_batch, to_dense_adj
 class GraphQNetwork(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, seed):
         super(GraphQNetwork, self).__init__()
@@ -184,13 +185,14 @@ class GraphQNetwork(torch.nn.Module):
         self.norm3 = GraphNorm(4)
 
 
-        self.pooling = GraphMultisetTransformer(8+6+4, k=8, heads=6)
+        # DiffPool layer
+        self.diffpool = DenseSAGEConv(4, 6)
 
         # Define dropout
         self.dropout = torch.nn.Dropout(p=0.5)
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(36, 8)
+        self.value_stream = torch.nn.Linear(4, 8)
         self.value = torch.nn.Linear(8, 1)
         self.advantage_stream = torch.nn.Linear(8+6+4 ,8)
         self.advantage = torch.nn.Linear(8, 1)
@@ -216,22 +218,27 @@ class GraphQNetwork(torch.nn.Module):
         advantage = F.relu(self.advantage_stream(x_conc))
         advantage = self.advantage(advantage).squeeze(-1)  # Remove last dimension
 
-        pooled_global = self.pooling(x_conc, batch)
-        # Reshape pooled_global to match x_conc's dimensions
-        pooled_global_batch =  pooled_global.squeeze().repeat(x_conc.size(0), 1) if batch is None else pooled_global[batch]
+        # Prepare for DiffPool
+        x, mask = to_dense_batch(x3, batch)
+        adj = to_dense_adj(edge_index, batch)
 
-        combined_features = torch.cat([pooled_global_batch, x_conc], dim=-1)  # Combine global and local features
-        value = F.relu(self.value_stream(combined_features))
+        # Apply DiffPool
+        s = self.diffpool(x, adj)
+        x, adj, l1, e1 = dense_diff_pool(x, adj, s, mask=mask)
+
+        # Global pooling for Dueling DQN
+        pooled_val = torch.mean(x, dim=1)
+
+        #combined_features = torch.cat([pooled_val, x_conc], dim=-1)
+        value = F.relu(self.value_stream(pooled_val))
         value = self.value(value).squeeze(-1)  # Remove last dimension
-
-        # Combine value and advantage streams
             
         # Calculate the mean advantage for each graph in the batch
         mean_advantage = global_mean_pool(advantage, batch)
 
         # Expand mean advantage to match the number of nodes
         expanded_mean_advantage = mean_advantage[batch]
-
+        value = value[batch]
         qvals = value + (advantage - expanded_mean_advantage)
 
         # Apply action mask if provided
@@ -381,7 +388,7 @@ class Agent:
             data_list.append(data)
 
         # Create a DataLoader for batching
-        batch_size = BATCH_SIZE
+        batch_size = 32
         data_loader = DataLoader(data_list, batch_size=batch_size, shuffle=True, follow_batch=['x_s', 'x_t'], pin_memory=True)
 
         for batch in data_loader:
