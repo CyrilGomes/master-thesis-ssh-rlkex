@@ -33,7 +33,7 @@ def compute_reward(has_found_target, visit_count,
     #print(f"Distance reward: {distance_reward}, Step penalty: {STEP_PENALTY}, Revisit penalty: {revisit_penalty}, New node bonus: {new_node_bonus}")
     return total_reward
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes, root_detection_model_path="models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
+    def __init__(self, graph, target_nodes,num_actions ,root_detection_model_path="models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
         """
         Initializes the Graph Traversal Environment.
 
@@ -45,7 +45,7 @@ class GraphTraversalEnv(gym.Env):
         """
         super(GraphTraversalEnv, self).__init__()
         self.path_cache = {}
-
+        self.action_space = spaces.Discrete(num_actions)
         self._validate_graph(graph)
         self.main_graph = graph
 
@@ -89,8 +89,6 @@ class GraphTraversalEnv(gym.Env):
         self.visited_keys = {}
         self.nb_targets = len(self.target_nodes)
         self.nb_actions_taken = 0
-        self.node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
-        self.inverse_node_mapping = {v: k for k, v in self.node_mapping.items()}
         self.target_node = None
         self.reset()
         self.assess_target_complexity()
@@ -168,7 +166,7 @@ class GraphTraversalEnv(gym.Env):
         self.PROXIMITY_MULTIPLIER = 3
         self.NEW_NODE_BONUS = 0.1
         self.NO_PATH_PENALTY = -3
-        self.ADDITIONAL_TARGET_MULTIPLIER = 1.5
+        self.ADDITIONAL_TARGET_MULTIPLIER = 30
 
 
     def _get_closest_target(self):
@@ -242,15 +240,6 @@ class GraphTraversalEnv(gym.Env):
         return self.best_root
 
 
-    def _update_action_space(self):
-        """
-        Updates the action space based on the current node.
-        """
-        num_actions = self.graph.out_degree(self.current_node)
-        #if num action is 0, it means we are at a leaf node, we should restart the agent from the root
-        if num_actions > 0:
-            self.action_space = spaces.Discrete(num_actions)
-
         
     def _define_observation_space(self):
         """
@@ -272,7 +261,6 @@ class GraphTraversalEnv(gym.Env):
         self.current_node = self._sample_start_node()
         self.visited_stack.append(self.current_node)
         self._increment_visited(self.current_node)
-        self._update_action_space()
 
     def _get_valid_actions(self):
         """
@@ -281,19 +269,12 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             list: A list of valid action indices in PyTorch Geometric format.
         """
-        neighbors = list(self.graph.successors(self.current_node))
+        neighbors = list(self.graph.successors(self.current_node))[:self.action_space.n]
         #For sanity check that the node mapping is correct
         
-        
-        valid_actions = [self.node_mapping[nx_id] for nx_id in neighbors if nx_id in self.node_mapping]
-        #convert the valid actions to the node mapping
-        reversed_valid_actions = [self.inverse_node_mapping[valid_action] for valid_action in valid_actions]
-
-        #check if neighbors are the same as the reversed valid actions
-        if not set(neighbors) == set(reversed_valid_actions):
-            raise ValueError(f"Neighbors: {neighbors}, reversed valid actions: {reversed_valid_actions}")
-        
-
+        #valid actions are the index of the neighbors
+        #for example, if we have a space of 50 actions, but if the current node has only 3 neighbors, then the valid actions are [0,1,2]
+        valid_actions = [i for i, _ in enumerate(neighbors)]
 
         return valid_actions
 
@@ -301,27 +282,9 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-    def _get_best_action(self):
-        """
-        Gets the best action to take from the current node.
-
-        Returns:
-            int[]: The best actions to take.
-        """
-
-        neighbors = list(self.graph.successors(self.current_node))
-        has_path_neighbors = []
-        for neighbor in neighbors:
-            #TODO : FIX the no target node
-            has_path = nx.has_path(self.graph, neighbor, self.target_node)
-            if has_path:
-                has_path_neighbors.append(neighbor)
-
-        neighbors_data_idx = [self.node_mapping[neighbor] for neighbor in has_path_neighbors]
-        return neighbors_data_idx
 
 
-    def _get_action_mask(self, supervised_prob = 0):
+    def _get_action_mask(self):
         """
         Creates a mask for valid actions in the action space.
 
@@ -330,31 +293,11 @@ class GraphTraversalEnv(gym.Env):
         """
         valid_actions = self._get_valid_actions()
 
-
-        if np.random.rand() < supervised_prob:
-            #get the best action
-            best_actions = self._get_best_action()
-            #chech if best action is in valid actions
-            if not set(best_actions).issubset(set(valid_actions)):
-                raise ValueError(f"Best actions: {best_actions}, valid actions: {valid_actions}")
-            valid_actions = best_actions
-
-
-
-
-        action_mask = np.full(len(self.node_mapping), 0)  # Assuming `self.node_mapping` maps all nodes
+        action_mask = np.full(self.action_space.n, 0)
         action_mask[valid_actions] = 1
 
         return action_mask
     
-
-
-
-
-    def _compute_distance_reward(self, targets, unreachable_penalty, normalization_factor):
-        #TODO : implement the distance reward
-        pass
-
 
 
 
@@ -366,8 +309,6 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError(f"Current node {self.current_node} has no neighbors")
 
 
-        #convert the id from Data to the id from the graph
-        action = self.inverse_node_mapping[action]
         distance_to_target = {}
         for target in self.target_nodes:
             distance_to_target[target] = self._get_path_length(self.current_node, target)
@@ -444,20 +385,16 @@ class GraphTraversalEnv(gym.Env):
         """
         neighbors = list(self.graph.neighbors(self.current_node))
 
-        if action not in neighbors:
-            print(f"Neighbors: {neighbors}")
-            raise ValueError(f"Action {action} is not a neighbor of node {self.current_node}")
-        else :
-            self.current_node = action
+        if action >= len(neighbors):
+            raise ValueError(f"Action {action} is out of range for neighbors {neighbors}")
         
+        self.current_node = neighbors[action]
         # Update the visited stack
         self.visited_stack.append(self.current_node)
 
         # Increment the visit count for the current node
         self._increment_visited(self.current_node)
 
-        # Update the action space
-        self._update_action_space()
 
 
 
@@ -518,7 +455,6 @@ class GraphTraversalEnv(gym.Env):
         self.current_node = self._sample_start_node()
         self.current_subtree_root = self.current_node
         self.visited_stack = []
-        self._update_action_space()
         self._reset_visited()
         self.visited_keys = set()
         self.nb_actions_taken = 0
@@ -559,8 +495,10 @@ class GraphTraversalEnv(gym.Env):
         """
 
 
+        node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
         # Use the node mapping to convert node indices
-        edge_index = torch.tensor([(self.node_mapping[u], self.node_mapping[v]) for u, v in self.graph.edges()], dtype=torch.long).t().contiguous()
+
+        edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in self.graph.edges()], dtype=torch.long).t().contiguous()
 
         #set the node "is_current" to 1 if it is the current node, 0 otherwise
         #set the number of keys found
@@ -615,7 +553,7 @@ class GraphTraversalEnv(gym.Env):
         transform = T.Compose([T.ToUndirected()])
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-        data = transform(data)
+        #data = transform(data)
         return data
 
     def close(self):

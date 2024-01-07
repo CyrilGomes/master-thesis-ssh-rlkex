@@ -15,7 +15,7 @@ from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 from torch_scatter import scatter_max
 
-from rl_env_graph_obs_variable_action_space import GraphTraversalEnv
+from fixed_action_space_env import GraphTraversalEnv
 from collections import deque
 import numpy as np
 import random
@@ -38,7 +38,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import heapq  # For priority queue
 import time
-from agent_variable_action_space import Agent
+from fixed_action_space_agent import Agent
 from utils import preprocess_graph, convert_types, add_global_root_node, connect_components, remove_all_isolated_nodes
 
 
@@ -51,17 +51,18 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e2)  # replay buffer size
-BATCH_SIZE = 32         # batch size
+BUFFER_SIZE = int(1e3)  # replay buffer size
+BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 0.005              # soft update of target parameters
+TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 10        # how often to update the network
+UPDATE_EVERY = 30        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
 STATE_SPACE = 14
 EDGE_ATTR_SIZE = 1
-agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
+ACTION_SPACE = 50
+agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, ACTION_SPACE,  seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
 
 
 
@@ -85,7 +86,7 @@ def test_for_graph(file):
     target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE ,obs_is_full_graph=True)
     check_parameters(env)
 
     
@@ -124,13 +125,13 @@ def execute_for_graph(file, training = True):
     target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE, obs_is_full_graph=True)
 
     check_parameters(env)
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 1500 * num_episode_multiplier if training else 2
+    num_episodes = 300 * num_episode_multiplier if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
