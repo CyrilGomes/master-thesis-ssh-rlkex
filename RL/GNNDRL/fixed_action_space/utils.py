@@ -108,6 +108,10 @@ class MyGraphData(Data):
             return None
         if key == 'next_mask':
             return None
+        if key == 'cnid':
+            return None
+        if key == 'next_cnid':
+            return None
 
         
         return super().__cat_dim__(key, value, *args, **kwargs)

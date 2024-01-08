@@ -59,7 +59,7 @@ LR = 0.01               # learning rate
 UPDATE_EVERY = 30        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 14
+STATE_SPACE = 15
 EDGE_ATTR_SIZE = 1
 ACTION_SPACE = 50
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, ACTION_SPACE,  seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
@@ -97,8 +97,10 @@ def test_for_graph(file):
         new_observation, reward, done, info = env.step(action)
         total_reward += reward
         if done:
-            if info["found_target"]:
-                print("Success !")
+            #print all the info
+            for key, value in info.items():
+                print(f"{key} : {value}")
+
             total_key_found = info["nb_keys_found"]
             break
         
@@ -129,7 +131,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 400 * num_episode_multiplier if training else 2
+    num_episodes = 500 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -159,7 +161,7 @@ def execute_for_graph(file, training = True):
 
         while not done:
             action_mask = env._get_action_mask()
-            weight_array = env._get_probability_distribution(action_mask)
+            weight_array = None# env._get_probability_distribution(action_mask)
 
             action = agent.act(observation, curr_eps, action_mask, weight_array)
             new_observation, reward, done, info = env.step(action)

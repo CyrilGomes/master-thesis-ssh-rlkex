@@ -30,33 +30,34 @@ class GraphQNetwork(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, num_actions, seed):
         super(GraphQNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
-
+        self.embedding_size = 3
         # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, 32, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
-        self.norm1 = GraphNorm(32*4)
-        self.topkpool1 = TopKPooling(32*4, ratio=0.8)
-        self.conv2 = GATv2Conv(32*4, 32, edge_dim=num_edge_features,heads=4, add_self_loops=True, dropout=0.5)
-        self.norm2 = GraphNorm(32*4)
-        self.topkpool2 = TopKPooling(32*4, ratio=0.8)
-        self.conv3 = GATv2Conv(32*4, 32, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
-        self.norm3 = GraphNorm(32*4)
-        self.topkpool3 = TopKPooling(32*4, ratio=0.8)
+        self.conv1 = GATv2Conv(num_node_features, self.embedding_size, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
+        self.norm1 = GraphNorm(self.embedding_size*4)
+        self.topkpool1 = TopKPooling(self.embedding_size*4, ratio=0.8)
+        self.conv2 = GATv2Conv(self.embedding_size*4, self.embedding_size, edge_dim=num_edge_features,heads=4, add_self_loops=True, dropout=0.5)
+        self.norm2 = GraphNorm(self.embedding_size*4)
+        self.topkpool2 = TopKPooling(self.embedding_size*4, ratio=0.8)
+        self.conv3 = GATv2Conv(self.embedding_size*4, self.embedding_size, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
+        self.norm3 = GraphNorm(self.embedding_size*4)
+        self.topkpool3 = TopKPooling(self.embedding_size*4, ratio=0.8)
 
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(32*4, 64)
-        self.value_2 = torch.nn.Linear(64, 32)
-        self.value = torch.nn.Linear(32, 1)
+        self.value_stream = torch.nn.Linear(self.embedding_size*4*3 + num_node_features, 16)
+        self.value_2 = torch.nn.Linear(16, 8)
+        self.value = torch.nn.Linear(8, 1)
 
-        self.advantage_stream = torch.nn.Linear(32*4, 64)
-        self.advantage_2 = torch.nn.Linear(64, 32)
-        self.advantage = torch.nn.Linear(32, num_actions)
+        self.advantage_stream = torch.nn.Linear(self.embedding_size*4*3 + num_node_features, 64)
+        self.advantage_2 = torch.nn.Linear(64, 64)
+        self.advantage = torch.nn.Linear(64, num_actions)
 
-    def forward(self, x, edge_index, edge_attr, batch , action_mask=None):  
+    def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None):  
 
         
         #ensure everything is on device
         x = x
+        x0 = x
         edge_index = edge_index
         edge_attr = edge_attr
         action_mask = action_mask.to(x.get_device())
@@ -68,17 +69,26 @@ class GraphQNetwork(torch.nn.Module):
         # Process with GAT layers
         x = F.relu(self.norm1(self.conv1(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
-        
+        x1 = x
         #x, edge_index, edge_attr, batch, _, _ = self.topkpool1(x, edge_index, edge_attr, batch=batch)
         x = F.relu(self.norm2(self.conv2(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
+        x2 = x
         #x, edge_index, edge_attr, batch, _, _ = self.topkpool2(x, edge_index, edge_attr, batch=batch)
         x = F.relu(self.norm3(self.conv3(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
+        x3 = x
         #x, edge_index, edge_attr, batch, _, _ = self.topkpool3(x, edge_index, edge_attr, batch=batch)
 
 
-        x = global_mean_pool(x, batch)
+        cumulative_nodes = torch.cumsum(batch.bincount(), 0)
+        global_node_indices = current_node_ids + torch.cat((torch.tensor([0], device=batch.device), cumulative_nodes[:-1]))
+        x0 = x0[global_node_indices]
+        x1 = x1[global_node_indices]
+        x2 = x2[global_node_indices]
+        x3 = x3[global_node_indices]
+
+        x = torch.cat((x0, x1, x2, x3), dim=1)
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x))
         advantage = F.dropout(advantage, p=0.5, training=self.training)
@@ -197,11 +207,12 @@ class Agent:
         if random.random() > eps:
             self.qnetwork_local.eval()
             x = state.x.to(self.device)
+            curr_node = state.current_node_id
             edge_index = state.edge_index.to(self.device)
             edge_attr = state.edge_attr.to(self.device)
 
             with torch.no_grad():  # Wrap in no_grad
-                action_values = self.qnetwork_local(x, edge_index, edge_attr, None, action_mask)
+                action_values = self.qnetwork_local(x, edge_index, edge_attr, None, curr_node, action_mask)
             return_values = action_values.cpu()
             self.qnetwork_local.train()
 
@@ -261,11 +272,14 @@ class Agent:
             mask = torch.tensor(e.action_mask, dtype=torch.int8)
             next_mask = torch.tensor(e.next_action_mask, dtype=torch.int8)
             is_weight = torch.tensor(is_weights[i][0])
+            current_node_id = torch.tensor(e.state.current_node_id, dtype=torch.long)
+            next_current_node_id = torch.tensor(e.next_state.current_node_id, dtype=torch.long)
 
             data = MyGraphData(x_s=state.x, edge_index_s=state.edge_index, edge_attr_s=state.edge_attr,
                             action=action, reward=reward, x_t=next_state.x,
                             edge_index_t=next_state.edge_index, edge_attr_t=next_state.edge_attr,
-                            done=done, exp_idx=exp_index, mask = mask, next_mask = next_mask, is_weight=is_weight)
+                            done=done, exp_idx=exp_index, mask = mask, next_mask = next_mask, is_weight=is_weight, 
+                            cnid=current_node_id, next_cnid=next_current_node_id)
             
             
 
@@ -298,18 +312,19 @@ class Agent:
             x_s_batch = batch.x_s_batch.to(device)
             x_t_batch = batch.x_t_batch.to(device)
             b_is_weight = batch.is_weight.to(device)
-
+            b_current_node_id = batch.cnid.to(device)
+            b_next_current_node_id = batch.next_cnid.to(device)
 
             # Calculate Q values for next states
             with torch.no_grad():
 
                 #Double DQN
-                q_local_next = self.qnetwork_local(b_x_t, b_edge_index_t, b_edge_attr_t, x_t_batch, action_mask=b_next_action_mask)
+                q_local_next = self.qnetwork_local(b_x_t, b_edge_index_t, b_edge_attr_t, x_t_batch, b_next_current_node_id, action_mask=b_next_action_mask)
                 #q_local_next is of shape [num_graphs, num_actions]
                 indices = torch.argmax(q_local_next, dim=1)
 
                 Q_targets_next = self.qnetwork_target(b_x_t, b_edge_index_t, 
-                                                    b_edge_attr_t, x_t_batch, 
+                                                    b_edge_attr_t, x_t_batch, b_next_current_node_id,
                                                     action_mask=b_next_action_mask)
                 
                 
@@ -317,7 +332,7 @@ class Agent:
 
             Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
 
-            Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, action_mask=b_action_mask)
+            Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, b_current_node_id, action_mask=b_action_mask)
 
 
             #b_action is of shape [batch_size]

@@ -84,7 +84,7 @@ class GraphTraversalEnv(gym.Env):
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 14 if self.obs_is_full_graph else 11
+        self.state_size = 15 if self.obs_is_full_graph else 11
 
         self.observation_space = self._define_observation_space()
         self.visited_keys = {}
@@ -112,11 +112,16 @@ class GraphTraversalEnv(gym.Env):
             sum_path += self._get_path_length(self.current_node, target)
         print(f"Path length from current node to target nodes: {sum_path}")
         mean_number_of_neighbors = np.mean([self.graph.out_degree(node) for node in self.graph.nodes])
-        print(f"Mean number of neighbors: {mean_number_of_neighbors}")
+        mean_number_of_neighbors_for_non_leaves = np.mean([self.graph.out_degree(node) for node in self.graph.nodes if self.graph.out_degree(node) > 0])
+        print(f"Mean number of neighbors: {mean_number_of_neighbors} (for non leaves: {mean_number_of_neighbors_for_non_leaves})")
         depth = nx.dag_longest_path_length(self.graph)
         print(f"Depth of the graph: {depth}")
         nb_neighbours_root = self.graph.out_degree(self.best_root)
         print(f"Number of neighbors of the root: {nb_neighbours_root}")
+        #number of leaves
+        nb_leaves = len([node for node in self.graph.nodes if self.graph.out_degree(node) == 0])
+        print(f"Number of leaves: {nb_leaves} which is {nb_leaves/len(self.graph.nodes)}% of the graph")
+
         print("------------------------------------------------------------------------")
 
 
@@ -404,7 +409,7 @@ class GraphTraversalEnv(gym.Env):
         obs = self._get_obs()
         done = not has_path or is_incorect_leaf
 
-        return obs, reward, done, self._episode_info(incorrect_leaf=is_incorect_leaf)
+        return obs, reward, done, self._episode_info(incorrect_leaf=is_incorect_leaf, no_path=not has_path)
 
 
 
@@ -430,7 +435,7 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-    def _episode_info(self, found_target=False, incorrect_leaf=False):
+    def _episode_info(self, found_target=False, incorrect_leaf=False, no_path=False):
         """
         Constructs additional info about the current episode.
 
@@ -447,6 +452,7 @@ class GraphTraversalEnv(gym.Env):
             'nb_actions_taken': self.nb_actions_taken,
             'nb_nodes_visited': self.calculate_number_visited_nodes(),
             'stopped_for_incorrect_leaf': incorrect_leaf,
+            'stopped_for_no_path': no_path,
         }
 
     def _increment_visited(self, node):
@@ -530,6 +536,8 @@ class GraphTraversalEnv(gym.Env):
 
 
         node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
+
+        data_space_current_node_idx = node_mapping[self.current_node]
         # Use the node mapping to convert node indices
 
         edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in self.graph.edges()], dtype=torch.long).t().contiguous()
@@ -543,6 +551,11 @@ class GraphTraversalEnv(gym.Env):
 
         map_neighbour_to_index = {neighbour: i for i, neighbour in enumerate(self.graph.successors(self.current_node))}
         #fill other nodes with -1
+        #for each node check if it is a visited key, for example if the node is the first visited key, then give it a value of 1, if it is the second visited key, then give it a value of 2, etc...
+
+        #create a mapping between node id and the index in the visited keys
+        map_visited_key_to_index = {key: i for i, key in enumerate(self.visited_keys)}
+        
 
         x = torch.tensor([[
             attributes['struct_size'],
@@ -558,8 +571,9 @@ class GraphTraversalEnv(gym.Env):
             self.graph.out_degree(node),
             1 if node == self.current_node else 0,
             node == self.best_root,
-            map_neighbour_to_index[node] if node in map_neighbour_to_index else -1
-
+            map_neighbour_to_index[node] if node in map_neighbour_to_index else -1,
+            map_visited_key_to_index[node] if node in map_visited_key_to_index else -1,
+            
         ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
 
         
@@ -597,7 +611,7 @@ class GraphTraversalEnv(gym.Env):
 
         
 
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, current_node_id = data_space_current_node_idx)
         data = transform(data)
 
         if data.x.shape[1] != self.state_size:
