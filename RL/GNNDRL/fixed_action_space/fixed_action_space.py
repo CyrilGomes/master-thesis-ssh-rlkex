@@ -51,7 +51,7 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e3)  # replay buffer size
+BUFFER_SIZE = int(1e4)  # replay buffer size
 BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.01              # soft update of target parameters
@@ -73,10 +73,6 @@ def check_parameters(env):
         raise ValueError("State space is not correct")
     
     
-
-
-
-
 def test_for_graph(file):
     """Basically the same as the training function, but without training"""
     graph = nx.read_graphml(file)
@@ -101,6 +97,8 @@ def test_for_graph(file):
         new_observation, reward, done, info = env.step(action)
         total_reward += reward
         if done:
+            if info["found_target"]:
+                print("Success !")
             total_key_found = info["nb_keys_found"]
             break
         
@@ -114,7 +112,7 @@ def test_for_graph(file):
 
 
 INIT_EPS = 0.98
-EPS_DECAY = 0.9999
+EPS_DECAY = 0.99999
 MIN_EPS = 0.05
 
 def execute_for_graph(file, training = True):
@@ -131,7 +129,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 300 * num_episode_multiplier if training else 2
+    num_episodes = 400 * num_episode_multiplier if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -161,7 +159,9 @@ def execute_for_graph(file, training = True):
 
         while not done:
             action_mask = env._get_action_mask()
-            action = agent.act(observation, curr_eps, action_mask)
+            weight_array = env._get_probability_distribution(action_mask)
+
+            action = agent.act(observation, curr_eps, action_mask, weight_array)
             new_observation, reward, done, info = env.step(action)
             next_action_mask = env._get_action_mask()
             curr_episode_rewards.append(reward)

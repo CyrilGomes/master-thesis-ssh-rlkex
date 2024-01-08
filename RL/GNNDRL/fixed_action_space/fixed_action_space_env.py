@@ -14,7 +14,8 @@ import concurrent.futures
 from numba import jit
 from torch_geometric.utils import to_undirected
 from root_heuristic_rf import GraphPredictor
-
+from torch_geometric.transforms import Compose, ToUndirected, AddSelfLoops, NormalizeFeatures
+from torch_geometric.utils import add_self_loops
 @jit(nopython=True)
 def compute_reward(has_found_target, visit_count, 
                    TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
@@ -136,6 +137,7 @@ class GraphTraversalEnv(gym.Env):
                 has_path[target] = True
             except nx.NetworkXNoPath:
                 has_path[target] = False
+                raise ValueError(f"There is no path from root {best_root} to target {target}")
 
         #if there is no path from root to all target nodes, throw an error
         if not all(has_path.values()):
@@ -166,7 +168,7 @@ class GraphTraversalEnv(gym.Env):
         self.PROXIMITY_MULTIPLIER = 3
         self.NEW_NODE_BONUS = 0.1
         self.NO_PATH_PENALTY = -3
-        self.ADDITIONAL_TARGET_MULTIPLIER = 30
+        self.ADDITIONAL_TARGET_MULTIPLIER = 20
 
 
     def _get_closest_target(self):
@@ -299,6 +301,41 @@ class GraphTraversalEnv(gym.Env):
         return action_mask
     
 
+    def _get_probability_distribution(self, action_mask):
+        """
+        Creates a weight vector for the action space.
+        Which makes 50% chance of choosing a good action and 50% chance of choosing a bad action
+
+        Returns:
+            np.array: An array representing the action mask.
+        """
+        #for each of the neighbour check if they have at least one path to a target
+        neighbours = list(self.graph.successors(self.current_node))
+        has_path_to_target = {}
+        for neighbour in neighbours:
+            has_path_to_target[neighbour] = False
+            for target in self.target_nodes:
+                if self._get_path_length(neighbour, target) is not None:
+                    has_path_to_target[neighbour] = True
+                    break
+        
+        #now for each neighbour, choosing a neighbour with a path to a target has 50% chance and choosing a neighbour without a path to a target has 50% chance
+        
+        nb_neighbours_with_path = sum(has_path_to_target.values())
+        valid_action_count = np.sum(action_mask)
+        nb_neighbours_without_path = valid_action_count - nb_neighbours_with_path
+        weight_array = np.zeros(len(action_mask))
+        #for each index of the action mask, if the neighbour has a path to a target, give it a weight of 1/nb_neighbours_with_path
+        #if the neighbour doesn't have a path to a target, give it a weight of 1/nb_neighbours_without_path
+        for i, neighbour in enumerate(neighbours):
+            if has_path_to_target[neighbour]:
+                weight_array[i] = 1/(2*nb_neighbours_with_path)
+            else:
+                weight_array[i] = 1/(2*nb_neighbours_without_path)
+
+
+        return weight_array
+    
 
 
 
@@ -316,11 +353,6 @@ class GraphTraversalEnv(gym.Env):
 
         self._perform_action(action)
         visit_count = self.graph.nodes[self.current_node]['visited']
-
-        
-
-
-
 
         #check if at least one target is reachable
         has_path = self._get_closest_target() is not None
@@ -346,7 +378,7 @@ class GraphTraversalEnv(gym.Env):
 
             #scale the reward by the index of the current closest target to the sorted targets
             #basically giving a better reward if the index is lower
-            distance_reward = self.PROXIMITY_MULTIPLIER * (len(sorted_targets) - sorted_targets.index(current_closest_target))/len(sorted_targets)
+            distance_reward = self.PROXIMITY_MULTIPLIER * (len(sorted_targets) - sorted_targets.index(current_closest_target))
             
             reward += distance_reward
 
@@ -372,7 +404,7 @@ class GraphTraversalEnv(gym.Env):
         obs = self._get_obs()
         done = not has_path or is_incorect_leaf
 
-        return obs, reward, done, self._episode_info()
+        return obs, reward, done, self._episode_info(incorrect_leaf=is_incorect_leaf)
 
 
 
@@ -398,7 +430,7 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-    def _episode_info(self, found_target=False):
+    def _episode_info(self, found_target=False, incorrect_leaf=False):
         """
         Constructs additional info about the current episode.
 
@@ -412,7 +444,9 @@ class GraphTraversalEnv(gym.Env):
         return {
             'found_target': found_target,
             'nb_keys_found': nb_keys_found,
-
+            'nb_actions_taken': self.nb_actions_taken,
+            'nb_nodes_visited': self.calculate_number_visited_nodes(),
+            'stopped_for_incorrect_leaf': incorrect_leaf,
         }
 
     def _increment_visited(self, node):
@@ -529,13 +563,15 @@ class GraphTraversalEnv(gym.Env):
         ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
 
         
-
         edge_attr = torch.tensor([data['offset'] for u, v, data in self.graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        
+        """
+
         # Normalize edge attributes
         edge_attr_np = edge_attr.numpy()
         edge_attr_np = (edge_attr_np - np.mean(edge_attr_np, axis=0)) / np.std(edge_attr_np, axis=0)
         edge_attr = torch.tensor(edge_attr_np, dtype=torch.float)
-        
+        """
         """
         # Standardize features (subtract mean, divide by standard deviation), ignore the last two features
         x_np = x.numpy()
@@ -547,13 +583,26 @@ class GraphTraversalEnv(gym.Env):
         #x = torch.tensor(x_np, dtype=torch.float)
         # Check if the shape of x matches self.state_size
 
-        if x.shape[1] != self.state_size:
-            raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
+
+
+        transform = T.Compose([
+            NormalizeFeatures(),    # Normalize node features
+        ])
+
+
+        #reverse the direction of the edges
+        edge_index = edge_index[[1,0],:]
+        edge_index, edge_attr = add_self_loops(edge_index, edge_attr=edge_attr, fill_value=0, num_nodes=x.shape[0])
+
+
         
-        transform = T.Compose([T.ToUndirected()])
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-        #data = transform(data)
+        data = transform(data)
+
+        if data.x.shape[1] != self.state_size:
+            raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
+        
         return data
 
     def close(self):

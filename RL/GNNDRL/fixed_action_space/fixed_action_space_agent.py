@@ -18,7 +18,7 @@ from torch_geometric.nn import global_mean_pool, global_add_pool, global_max_poo
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 from torch.optim import Adam
-
+import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import random
 
@@ -32,13 +32,13 @@ class GraphQNetwork(torch.nn.Module):
         self.seed = torch.manual_seed(seed)
 
         # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, 32, edge_dim=num_edge_features, heads=4, add_self_loops=False, dropout=0.5)
+        self.conv1 = GATv2Conv(num_node_features, 32, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
         self.norm1 = GraphNorm(32*4)
         self.topkpool1 = TopKPooling(32*4, ratio=0.8)
-        self.conv2 = GATv2Conv(32*4, 32, edge_dim=num_edge_features,heads=4, add_self_loops=False, dropout=0.5)
+        self.conv2 = GATv2Conv(32*4, 32, edge_dim=num_edge_features,heads=4, add_self_loops=True, dropout=0.5)
         self.norm2 = GraphNorm(32*4)
         self.topkpool2 = TopKPooling(32*4, ratio=0.8)
-        self.conv3 = GATv2Conv(32*4, 32, edge_dim=num_edge_features, heads=4, add_self_loops=False, dropout=0.5)
+        self.conv3 = GATv2Conv(32*4, 32, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
         self.norm3 = GraphNorm(32*4)
         self.topkpool3 = TopKPooling(32*4, ratio=0.8)
 
@@ -69,13 +69,13 @@ class GraphQNetwork(torch.nn.Module):
         x = F.relu(self.norm1(self.conv1(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
         
-        x, edge_index, edge_attr, batch, _, _ = self.topkpool1(x, edge_index, edge_attr, batch=batch)
+        #x, edge_index, edge_attr, batch, _, _ = self.topkpool1(x, edge_index, edge_attr, batch=batch)
         x = F.relu(self.norm2(self.conv2(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
-        x, edge_index, edge_attr, batch, _, _ = self.topkpool2(x, edge_index, edge_attr, batch=batch)
+        #x, edge_index, edge_attr, batch, _, _ = self.topkpool2(x, edge_index, edge_attr, batch=batch)
         x = F.relu(self.norm3(self.conv3(x, edge_index, edge_attr)))
         x = F.dropout(x, p=0.5, training=self.training)
-        x, edge_index, edge_attr, batch, _, _ = self.topkpool3(x, edge_index, edge_attr, batch=batch)
+        #x, edge_index, edge_attr, batch, _, _ = self.topkpool3(x, edge_index, edge_attr, batch=batch)
 
 
         x = global_mean_pool(x, batch)
@@ -190,7 +190,7 @@ class Agent:
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
 
-    def act(self, state, eps=0, action_mask=None):
+    def act(self, state, eps=0, action_mask=None, weight_array=None):
         state = state
         action_mask = torch.from_numpy(action_mask)
 
@@ -210,9 +210,21 @@ class Agent:
 
             return selected_action
         else:
-            choices = (action_mask.cpu() == 1).nonzero(as_tuple=True)[0]
+            
 
-            return random.choice(choices).item()
+            if weight_array is not None:
+                #weight_array is of shape [num_actions]
+                #some has probability 0 if they are not valid actions
+
+                #select the action based on the probability distribution
+                #given by the weight_array
+                np.random.seed()
+                selected_action = np.random.choice(np.arange(len(weight_array)), p=weight_array)
+            else:
+                choices = (action_mask.cpu() == 1).nonzero(as_tuple=True)[0]
+
+                selected_action = np.random.choice(choices)
+            return selected_action
     
     def save_checkpoint(self, filename):
         checkpoint = {
@@ -234,7 +246,9 @@ class Agent:
 
     def learn(self, experiences, indices, is_weights, gamma):
         # Create a list of Data objects, each representing a graph experience
-
+        # DDQN Update for the individual graph
+        self.qnetwork_local.train()
+        self.qnetwork_target.train()
 
         data_list = []
         for i, e in enumerate(experiences):
@@ -285,9 +299,7 @@ class Agent:
             x_t_batch = batch.x_t_batch.to(device)
             b_is_weight = batch.is_weight.to(device)
 
-            # DDQN Update for the individual graph
-            self.qnetwork_target.eval()
-            self.qnetwork_local.train()
+
             # Calculate Q values for next states
             with torch.no_grad():
 
@@ -305,7 +317,6 @@ class Agent:
 
             Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
 
-            self.qnetwork_local.train()
             Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, action_mask=b_action_mask)
 
 
