@@ -18,23 +18,21 @@ from torch_geometric.transforms import Compose, ToUndirected, AddSelfLoops, Norm
 from torch_geometric.utils import add_self_loops
 @jit(nopython=True)
 def compute_reward(has_found_target, visit_count, 
-                   TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, 
-                    NEW_NODE_BONUS, NO_PATH_PENALTY, visited_keys_count, has_path, nb_targets):
+                   TARGET_FOUND_REWARD, STEP_PENALTY, REVISIT_PENALTY, NO_PATH_PENALTY, has_path):
     
 
     if has_found_target:
-        target_reward =  TARGET_FOUND_REWARD * (visited_keys_count / nb_targets)
+        target_reward =  TARGET_FOUND_REWARD
         return target_reward
     if has_path == False:
         return NO_PATH_PENALTY
     revisit_penalty = REVISIT_PENALTY if visit_count > 1 else 0
-    new_node_bonus = NEW_NODE_BONUS if visit_count == 0 else 0
-    
-    total_reward = STEP_PENALTY + revisit_penalty + new_node_bonus
+
+    total_reward = STEP_PENALTY + revisit_penalty
     #print(f"Distance reward: {distance_reward}, Step penalty: {STEP_PENALTY}, Revisit penalty: {revisit_penalty}, New node bonus: {new_node_bonus}")
     return total_reward
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes,num_actions ,root_detection_model_path="models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
+    def __init__(self, graph, target_nodes,num_actions ,root_detection_model_path="models/root_heuristic_model.joblib"):
         """
         Initializes the Graph Traversal Environment.
 
@@ -52,11 +50,9 @@ class GraphTraversalEnv(gym.Env):
 
 
         self.target_nodes = target_nodes
-        self.max_episode_steps = max_episode_steps
         self.shortest_path_cache = {}
         self.visited_stack = []
         self.current_node_iterator = 0
-        self.obs_is_full_graph = obs_is_full_graph
 
         self._init_rewards_and_penalties()
         #load model
@@ -84,10 +80,9 @@ class GraphTraversalEnv(gym.Env):
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 13 if self.obs_is_full_graph else 11
+        self.state_size = 13
 
         self.observation_space = self._define_observation_space()
-        self.visited_keys = {}
         self.nb_targets = len(self.target_nodes)
         self.nb_actions_taken = 0
         self.target_node = None
@@ -168,27 +163,13 @@ class GraphTraversalEnv(gym.Env):
 
     def _init_rewards_and_penalties(self):
         self.TARGET_FOUND_REWARD = 20
-        self.STEP_PENALTY = -0.1
-        self.REVISIT_PENALTY = -0.1
-        self.PROXIMITY_MULTIPLIER = 15
-        self.NEW_NODE_BONUS = 0.15
-        self.NO_PATH_PENALTY = -0.2
-        self.ADDITIONAL_TARGET_MULTIPLIER = 20
+        self.STEP_PENALTY = -0.2
+        self.REVISIT_PENALTY = -0.5
+        self.PROXIMITY_MULTIPLIER = 1.2
+        self.NO_PATH_PENALTY = 0
 
 
-    def _get_closest_target(self):
-        """
-        Finds the closest target node to the current node.
 
-        Returns:
-            Node: The closest target node.
-        """
-        closest_target, closest_target_dist = None, float('inf')
-        for target in [t for t in self.target_nodes if t not in self.visited_keys]:
-            path_length = self._get_path_length(self.current_node, target)
-            if path_length is not None and path_length < closest_target_dist:
-                closest_target_dist, closest_target = path_length, target
-        return closest_target
 
     def _get_path_length(self, source, target):
         """
@@ -344,49 +325,75 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-    def step(self, action):
+    def _get_distance_to_goal(self, goal):
+        """
+        Gets the distance from the current node to the goal node.
+
+        Args:
+            goal: The goal node.
+
+        Returns:
+            int or None: Distance to the goal node or None if no path exists.
+        """
+        #get the goalth target node
+        target_node = self.target_nodes[goal]
+        # If no path exists, return None.
+        try:
+            # Check if the path is in the cache
+            if (self.current_node, target_node) in self.path_cache:
+                return self.path_cache[(self.current_node, target_node)]
+            
+            path = nx.shortest_path(self.graph, self.current_node, target_node)
+            dist = len(path) - 1
+
+            # Store the path length in the cache
+            self.path_cache[(self.current_node, target_node)] = dist
         
+
+            return dist
+        except nx.NetworkXNoPath:
+            return None
+
+
+    def step(self, action, goal):
+        
+        #goal is a number defining the target node (0, 1, 2, 3, etc...)
+        #check if the goal is a valid target node
+        if goal >= len(self.target_nodes):
+            raise ValueError(f"Goal {goal} is out of range for target nodes {self.target_nodes}")
+
+
         #check if has neighbors
         if self.graph.out_degree(self.current_node) == 0:
             raise ValueError(f"Current node {self.current_node} has no neighbors")
 
 
-        distance_to_target = {}
-        for target in self.target_nodes:
-            distance_to_target[target] = self._get_path_length(self.current_node, target)
-            
+        prev_distance_to_goal = self._get_distance_to_goal(goal)
 
         self._perform_action(action)
         visit_count = self.graph.nodes[self.current_node]['visited']
 
-        #check if at least one target is reachable
-        has_path = self._get_closest_target() is not None
+        new_distance_to_goal = self._get_distance_to_goal(goal)
+
+        #check if goal is reachable
+        has_path = new_distance_to_goal is not None
 
 
-        has_found_target = self.current_node in self.target_nodes and self.current_node not in self.visited_keys
-        reward = compute_reward( has_found_target, visit_count, 
-                   self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY, 
-                    self.NEW_NODE_BONUS, self.NO_PATH_PENALTY, len(self.visited_keys), has_path, self.nb_targets)
+        has_found_target = self.current_node == self.target_nodes[goal]
+
+        reward = compute_reward(has_found_target, visit_count, 
+                   self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.REVISIT_PENALTY, self.NO_PATH_PENALTY, has_path)
         
         
         if has_path and not has_found_target:
 
-            #remove None values
-            distance_to_target = {k: v for k, v in distance_to_target.items() if v is not None}
-            sorted_targets = sorted(distance_to_target, key=distance_to_target.get)
-            #get the closest target
-            current_closest_target = self._get_closest_target()
+            if new_distance_to_goal < prev_distance_to_goal:
+                #give a reward for getting closer to the target
+                distance_reward = self.PROXIMITY_MULTIPLIER
+            elif new_distance_to_goal > prev_distance_to_goal:
+                #give a penalty for getting farther from the target
+                distance_reward = -self.PROXIMITY_MULTIPLIER
 
-            #safe check if the current closest target is not in the sorted targets
-            if current_closest_target not in sorted_targets:
-                raise ValueError(f"Current closest target {current_closest_target} is not in sorted targets {sorted_targets} it shouldn't be!")
-
-            #scale the reward by the index of the current closest target to the sorted targets
-            #basically giving a better reward if the index is lower
-
-
-            distance_reward = self.PROXIMITY_MULTIPLIER * ((len(sorted_targets) - sorted_targets.index(current_closest_target))/len(sorted_targets))
-            
             reward += distance_reward
 
 
@@ -396,15 +403,11 @@ class GraphTraversalEnv(gym.Env):
         if has_found_target:
 
             #print(f"Found target {self.target_node}! reward : {reward}")
-            self.visited_keys.add(self.current_node)
             obs = self._get_obs()
-            if len(self.visited_keys) == self.nb_targets:
-                #print("All targets found!")
-                reward = self.TARGET_FOUND_REWARD * 15
-                return obs, reward, True, self._episode_info(found_target=True)
 
-            self._restart_agent_from_root()
-            return obs, reward, False, self._episode_info()
+            reward = self.TARGET_FOUND_REWARD
+            return obs, reward, True, self._episode_info(found_target=True)
+
         elif self.graph.out_degree(self.current_node) == 0:
             is_incorect_leaf = True
 
@@ -447,10 +450,8 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             dict: Additional info about the episode.
         """
-        nb_keys_found = len(self.visited_keys)
         return {
             'found_target': found_target,
-            'nb_keys_found': nb_keys_found,
             'nb_actions_taken': self.nb_actions_taken,
             'nb_nodes_visited': self.calculate_number_visited_nodes(),
             'stopped_for_incorrect_leaf': incorrect_leaf,
@@ -498,10 +499,8 @@ class GraphTraversalEnv(gym.Env):
         self.current_subtree_root = self.current_node
         self.visited_stack = []
         self._reset_visited()
-        self.visited_keys = set()
         self.nb_actions_taken = 0
         self.observation_space = self._define_observation_space()
-        self.target_node = self._get_closest_target()
 
         return self._get_obs()
     
@@ -549,18 +548,12 @@ class GraphTraversalEnv(gym.Env):
 
         #give each node the index from the visited stack
 
-        found_keys = len(self.visited_keys) / self.nb_targets
         num_nodes_in_graph = len(self.graph.nodes)
 
         map_neighbour_to_index = {neighbour: i for i, neighbour in enumerate(self.graph.successors(self.current_node))}
-        #fill other nodes with -1
-        #for each node check if it is a visited key, for example if the node is the first visited key, then give it a value of 1, if it is the second visited key, then give it a value of 2, etc...
-
-        #create a mapping between node id and the index in the visited keys
-        map_visited_key_to_index = {key: i for i, key in enumerate(self.visited_keys)}
-        
-        nb_nodes_visited = len(self.visited_keys)
-
+ 
+        nb_nodes_visited = self.calculate_number_visited_nodes()
+        nb_neighbours = self.graph.out_degree(self.current_node)
         x = torch.tensor([[
             attributes['struct_size'],
             attributes['valid_pointer_count'],
@@ -571,10 +564,10 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_valid_pointer_offset'],
             attributes['visited'] / nb_nodes_visited if nb_nodes_visited > 0 else 0,
             self.nb_targets,
-            found_keys,
             self.graph.out_degree(node),
-            node == self.best_root,
-            num_nodes_in_graph        
+            num_nodes_in_graph,
+            node == self.current_node,
+            map_neighbour_to_index[node]/nb_neighbours if node in map_neighbour_to_index else -1, 
         ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
 
         
@@ -607,8 +600,8 @@ class GraphTraversalEnv(gym.Env):
 
 
         #reverse the direction of the edges
-        edge_index = edge_index[[1,0],:]
-        edge_index, edge_attr = add_self_loops(edge_index, edge_attr=edge_attr, fill_value=0, num_nodes=x.shape[0])
+        #edge_index = edge_index[[1,0],:]
+        #edge_index, edge_attr = add_self_loops(edge_index, edge_attr=edge_attr, fill_value=0, num_nodes=x.shape[0])
 
 
         
@@ -619,6 +612,7 @@ class GraphTraversalEnv(gym.Env):
         if data.x.shape[1] != self.state_size:
             raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
         
+
         return data
 
     def close(self):

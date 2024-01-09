@@ -15,7 +15,7 @@ from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 from torch_scatter import scatter_max
 
-from fixed_action_space_env import GraphTraversalEnv
+from fixed_action_space_env_goal import GraphTraversalEnv
 from collections import deque
 import numpy as np
 import random
@@ -38,7 +38,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import heapq  # For priority queue
 import time
-from fixed_action_space_agent import Agent
+from fixed_action_space_goal_agent import Agent
 from utils import preprocess_graph, convert_types, add_global_root_node, connect_components, remove_all_isolated_nodes
 
 
@@ -56,13 +56,14 @@ BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 50        # how often to update the network
+UPDATE_EVERY = 20        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
 STATE_SPACE = 13
 EDGE_ATTR_SIZE = 1
 ACTION_SPACE = 50
-agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, ACTION_SPACE,  seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
+GOAL_SPACE = 6
+agent = Agent(STATE_SPACE, GOAL_SPACE, EDGE_ATTR_SIZE, ACTION_SPACE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
 
 
 
@@ -82,39 +83,59 @@ def test_for_graph(file):
     target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE ,obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE)
     check_parameters(env)
 
     
-    observation = env.reset()
-    done = False
-    total_reward = 0
     total_key_found = 0
+    mean_reward = 0
 
-    while not done:
-        action_mask = env._get_action_mask()
-        action = agent.act(observation, 0, action_mask)
-        new_observation, reward, done, info = env.step(action)
-        total_reward += reward
-        if done:
-            #print all the info
-            for key, value in info.items():
-                print(f"{key} : {value}")
-
-            total_key_found = info["nb_keys_found"]
-            break
-        
-        observation = new_observation
+    for goal in range(len(target_nodes)):
+        one_hot_goal = create_one_hot_goal(goal)
+        observation = env.reset()
+        done = False
+        episode_reward = 0
+        while not done:
+            action_mask = env._get_action_mask()
+            action = agent.act(observation,one_hot_goal, 0, action_mask)
+            new_observation, reward, done, info = env.step(action, goal)
+            episode_reward += reward
+            if done:
+                if info["found_target"]:
+                    total_key_found += 1
+                #print all the info
+                """
+                for key, value in info.items():
+                    print(f"{key} : {value}")
+                break
+                """
+            
+            observation = new_observation
+        mean_reward += episode_reward
+    mean_reward /= len(target_nodes)
     
-    return total_reward, total_key_found, len(target_nodes)
+    return mean_reward, total_key_found, len(target_nodes)
 
   
 
 
+def create_one_hot_goal( goal):
+    """
+    Creates a one-hot vector for the goal node.
+    Args:
+        goal: The goal node.
+    Returns:
+        np.array: A one-hot vector for the goal node.
+    """
+    nb_goals = 6
+    one_hot = torch.zeros(nb_goals)
+    one_hot[goal] = 1
+    return one_hot
+    
 
 
 INIT_EPS = 0.98
-EPS_DECAY = 0.99993
+EPS_DECAY = 0.9999
 MIN_EPS = 0.01
 
 def execute_for_graph(file, training = True):
@@ -125,13 +146,13 @@ def execute_for_graph(file, training = True):
     target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE, obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE)
 
     check_parameters(env)
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 500 if training else 2
+    num_episodes = 10000 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -145,6 +166,11 @@ def execute_for_graph(file, training = True):
     nb_moves_per_episode = []
     
     for episode in range_episode:
+        
+        #get a random index goal from 0 to len(target_nodes) - 1 included
+        goal = random.randint(0, len(target_nodes) - 1)
+        goal_one_hot = create_one_hot_goal(goal)
+
         observation = env.reset()
         episode_reward = 0
         episode_stats = {"nb_of_moves": 0,
@@ -167,19 +193,17 @@ def execute_for_graph(file, training = True):
             action_mask = env._get_action_mask()
             weight_array = None# env._get_probability_distribution(action_mask)
 
-            action = agent.act(observation, curr_eps, action_mask, weight_array)
-            new_observation, reward, done, info = env.step(action)
+            action = agent.act(observation, goal_one_hot, curr_eps, action_mask, weight_array)
+            new_observation, reward, done, info = env.step(action, goal)
             next_action_mask = env._get_action_mask()
             curr_episode_rewards.append(reward)
             if training:
 
-                agent.step(observation, action, reward, new_observation, done, action_mask, next_action_mask)
+                agent.step(observation, action, goal_one_hot, reward, new_observation, done, action_mask, next_action_mask)
 
             episode_stats["nb_of_moves"] += 1
             
             if done:
-                episode_stats["nb_key_found"] = info["nb_keys_found"]
-                max_key_found = max(max_key_found, info["nb_keys_found"])
                 if info["found_target"]:
                     stats["nb_success"] += 1
                     #print("Success !")
@@ -190,56 +214,26 @@ def execute_for_graph(file, training = True):
         keys_per_episode.append(episode_stats["nb_key_found"])
         episode_reward = np.sum(curr_episode_rewards)
         nb_moves_per_episode.append(episode_stats["nb_of_moves"])
-        """
-        if episode == num_episodes - 1:
-            plt.plot(curr_episode_rewards)
-            plt.show()
-        """
-        """
-        if episode_stats["nb_key_found"] > max_key_found:
-            max_key_found = episode_stats["nb_key_found"]
-            max_posssible_key = episode_stats["nb_possible_keys"]
-        """
+
         if episode_reward > max_reward:
             max_reward = episode_reward
 
-
-        """
-        if episode % 500 == 499:
-            #plot the losses of the agent
-            moving_average = np.convolve(agent.losses, np.ones((100,))/100, mode='valid')
-            plt.plot(moving_average)
-            plt.show()
-        """
-        # Update the plot after each episode
-
-        """
-        ax.clear()
-        ax.plot(agent.gradient_norms)
-        ax.set_title("Gradient Norms During Training")
-        ax.set_xlabel("Training Steps")
-        ax.set_ylabel("Average Gradient Norm")
-        plt.pause(0.001)  # Pause briefly to update the plot
-        """
         avg_reward = np.mean(episode_rewards[-10:]) if len(episode_rewards) > 0 else 0.0
 
-        key_found_ratio = episode_stats["nb_key_found"] / len(target_nodes)
 
         metrics = {
             'Average Reward': episode_reward,
             'Loss': agent.losses[-1] if len(agent.losses) > 0 else 0.0,
             'Epsilon': curr_eps,
-            'MaxKeyFound' : max_key_found,
-            'KeyFoundRatio' : key_found_ratio,
             'NbMoves' : episode_stats["nb_of_moves"],
+            'success' : info["found_target"],
 
         }
         agent.log_metrics(metrics)
 
 
-        avg_key_found = np.mean(keys_per_episode[-10:]) if len(keys_per_episode) > 0 else 0.0
         avg_nb_moves = np.mean(nb_moves_per_episode[-10:]) if len(nb_moves_per_episode) > 0 else 0.0
-        range_episode.set_description(f"MER : {max_reward:.2f} MaxKeyFnd : {max_key_found:.2f} NbMvs : {avg_nb_moves:.2f} AvgKeyFound : {avg_key_found:.2f} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
+        range_episode.set_description(f"MER : {max_reward:.2f}  NbMvs : {avg_nb_moves:.2f} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
 
@@ -288,7 +282,7 @@ for curr_try in range( nb_try):
             execute_for_graph(file, True)
             print(f"Executing Testing for {file}")
             reward, nb_found_keys, nb_keys = test_for_graph(file)
-            print(f"Found {nb_found_keys} / {nb_keys} keys with a total reward of {reward}")
+            print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
     print(f"Training done ")
 
 
