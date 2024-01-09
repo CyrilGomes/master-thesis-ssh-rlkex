@@ -21,104 +21,9 @@ from torch.optim import Adam
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import random
-
+from panconv_dql import PANConcDQL
 from utils import MyGraphData
 from per import SumTree, Memory
-
-
-class GraphQNetwork(torch.nn.Module):
-    def __init__(self, num_node_features, num_edge_features, num_actions, seed):
-        super(GraphQNetwork, self).__init__()
-        self.seed = torch.manual_seed(seed)
-        self.embedding_size = 3
-        # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, self.embedding_size, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
-        self.norm1 = GraphNorm(self.embedding_size*4)
-        self.topkpool1 = TopKPooling(self.embedding_size*4, ratio=0.8)
-        self.conv2 = GATv2Conv(self.embedding_size*4, self.embedding_size, edge_dim=num_edge_features,heads=4, add_self_loops=True, dropout=0.5)
-        self.norm2 = GraphNorm(self.embedding_size*4)
-        self.topkpool2 = TopKPooling(self.embedding_size*4, ratio=0.8)
-        self.conv3 = GATv2Conv(self.embedding_size*4, self.embedding_size, edge_dim=num_edge_features, heads=4, add_self_loops=True, dropout=0.5)
-        self.norm3 = GraphNorm(self.embedding_size*4)
-        self.topkpool3 = TopKPooling(self.embedding_size*4, ratio=0.8)
-
-
-        # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(self.embedding_size*4*3 + num_node_features, 16)
-        self.value_2 = torch.nn.Linear(16, 8)
-        self.value = torch.nn.Linear(8, 1)
-
-        self.advantage_stream = torch.nn.Linear(self.embedding_size*4*3 + num_node_features, 64)
-        self.advantage_2 = torch.nn.Linear(64, 64)
-        self.advantage = torch.nn.Linear(64, num_actions)
-
-    def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None):  
-
-        
-        #ensure everything is on device
-        x = x
-        x0 = x
-        edge_index = edge_index
-        edge_attr = edge_attr
-        action_mask = action_mask.to(x.get_device())
-        if batch is None:
-            batch = torch.zeros(x.shape[0], dtype=torch.long)
-
-        batch = batch.to(x.get_device())
-
-        # Process with GAT layers
-        x = F.relu(self.norm1(self.conv1(x, edge_index, edge_attr)))
-        x = F.dropout(x, p=0.5, training=self.training)
-        x1 = x
-        #x, edge_index, edge_attr, batch, _, _ = self.topkpool1(x, edge_index, edge_attr, batch=batch)
-        x = F.relu(self.norm2(self.conv2(x, edge_index, edge_attr)))
-        x = F.dropout(x, p=0.5, training=self.training)
-        x2 = x
-        #x, edge_index, edge_attr, batch, _, _ = self.topkpool2(x, edge_index, edge_attr, batch=batch)
-        x = F.relu(self.norm3(self.conv3(x, edge_index, edge_attr)))
-        x = F.dropout(x, p=0.5, training=self.training)
-        x3 = x
-        #x, edge_index, edge_attr, batch, _, _ = self.topkpool3(x, edge_index, edge_attr, batch=batch)
-
-
-        cumulative_nodes = torch.cumsum(batch.bincount(), 0)
-        global_node_indices = current_node_ids + torch.cat((torch.tensor([0], device=batch.device), cumulative_nodes[:-1]))
-        x0 = x0[global_node_indices]
-        x1 = x1[global_node_indices]
-        x2 = x2[global_node_indices]
-        x3 = x3[global_node_indices]
-
-        x = torch.cat((x0, x1, x2, x3), dim=1)
-        # Compute node-level advantage
-        advantage = F.relu(self.advantage_stream(x))
-        advantage = F.dropout(advantage, p=0.5, training=self.training)
-        advantage = F.relu(self.advantage_2(advantage))
-        advantage = F.dropout(advantage, p=0.5, training=self.training)
-        advantage = self.advantage(advantage)
-        #advantage should be of shape [num_graphs, num_actions]
-
-        value = F.relu(self.value_stream(x))
-        value = F.dropout(value, p=0.5, training=self.training)
-        value = F.relu(self.value_2(value))
-        value = F.dropout(value, p=0.5, training=self.training)
-        value = self.value(value)
-        #value should be of shape [num_graphs, 1]
-
-        mean_advantage = torch.mean(advantage, dim=1, keepdim=True)
-        qvals = value + (advantage - mean_advantage)
-
-
-        qvals = qvals.masked_fill(action_mask == 0, -1e8)
-
-
-
-
-        #check if qvals contains nan
-        if torch.isnan(qvals).any():
-            raise ValueError("Qvals contains nan")
-
-        return qvals
-
 
 
 
@@ -127,7 +32,7 @@ class GraphQNetwork(torch.nn.Module):
 # -------------------------
 class Agent:
     def __init__(self, state_size, edge_attr_size, action_space, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE')  # Choose an appropriate experiment name
+        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_PAN_CONV')  # Choose an appropriate experiment name
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
@@ -142,8 +47,8 @@ class Agent:
 
 
         # Q-Network
-        self.qnetwork_local = GraphQNetwork(state_size, self.edge_attr_size, action_space, seed).to(device)
-        self.qnetwork_target = GraphQNetwork(state_size,self.edge_attr_size,action_space, seed).to(device)
+        self.qnetwork_local = PANConcDQL(state_size, self.edge_attr_size, action_space, seed).to(device)
+        self.qnetwork_target = PANConcDQL(state_size,self.edge_attr_size,action_space, seed).to(device)
 
         #init the weights of the target network to be the same as the local network
         self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
@@ -160,6 +65,8 @@ class Agent:
 
         self.losses = []
         self.steps = 0
+
+        self.is_ready = False
 
 
 
@@ -197,6 +104,9 @@ class Agent:
         self.t_step = (self.t_step + 1) % self.update_every
         if self.t_step == 0:
             if len(self.buffer) >= self.buffer_size:
+                if not self.is_ready:
+                    self.is_ready = True
+                    print("Agent is ready")
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
 

@@ -56,10 +56,10 @@ BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 30        # how often to update the network
+UPDATE_EVERY = 50        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 15
+STATE_SPACE = 13
 EDGE_ATTR_SIZE = 1
 ACTION_SPACE = 50
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, ACTION_SPACE,  seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
@@ -114,8 +114,8 @@ def test_for_graph(file):
 
 
 INIT_EPS = 0.98
-EPS_DECAY = 0.99999
-MIN_EPS = 0.05
+EPS_DECAY = 0.99993
+MIN_EPS = 0.01
 
 def execute_for_graph(file, training = True):
     graph = nx.read_graphml(file)
@@ -150,12 +150,16 @@ def execute_for_graph(file, training = True):
         episode_stats = {"nb_of_moves": 0,
                          "nb_key_found": 0,
                          'nb_possible_keys' : 0}
-        global EPS 
-        if training:
-            EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
-        
-        #a function of episode over num_epsiode, such that at the end it is 0.05, linear
-        curr_eps = EPS
+        if not agent.is_ready:
+            curr_eps = 1
+        else:
+            global EPS 
+            if training:
+                EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
+            
+            #a function of episode over num_epsiode, such that at the end it is 0.05, linear
+            curr_eps = EPS
+
         curr_episode_rewards = []
         done = False
 
