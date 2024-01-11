@@ -131,6 +131,16 @@ fn create_output_subfolder(
 lazy_static! {
     static ref POTENTIAL_POINTER_REGEX: Regex = Regex::new(r"0x[1-9a-fA-F][0-9a-fA-F]{11}").unwrap();
     static ref KEY_REGEX: Regex = Regex::new(r"KEY_([A-Z])_ADDR").unwrap();
+    static ref KEY_TO_INDEX_MAP: HashMap<&'static str, i8> = {
+        let mut m = HashMap::new();
+        m.insert("A", 0);
+        m.insert("B", 1);
+        m.insert("C", 2);
+        m.insert("D", 3);
+        m.insert("E", 4);
+        m.insert("F", 5);
+        m
+    };
 }
 
 fn process_files(json_path: &Path, raw_path: &Path, output_folder: &str, base_name: &str) {
@@ -187,7 +197,11 @@ fn process_files(json_path: &Path, raw_path: &Path, output_folder: &str, base_na
 
 
 
-fn is_key_pointer(pointer_address: usize, json: &Value) -> bool {
+fn is_key_pointer(pointer_address: usize, json: &Value) -> i8 {
+
+    //return -1 if no match; 0 if it is Key "A", 1 if it is Key "B", etc.
+
+
 
     // Iterate through the JSON keys
     for (key, value) in json.as_object().unwrap() {
@@ -201,8 +215,9 @@ fn is_key_pointer(pointer_address: usize, json: &Value) -> bool {
                         if let Some(value) = json.get(&key_name) {
                             if let Some(value_str) = value.as_str() {
                                 if !value_str.is_empty() {
-                                    return true; // The pointer address matches a key and its value is not empty
+                                    return *KEY_TO_INDEX_MAP.get(caps.get(1).unwrap().as_str()).unwrap();
                                 }
+
                             }
                         }
                     }
@@ -211,7 +226,8 @@ fn is_key_pointer(pointer_address: usize, json: &Value) -> bool {
         }
     }
 
-    false
+    return -1;
+    
 }
 
 fn process_struct(heap_data: &[u8], pointer_address: usize, graph: &mut DiGraph<Pointer, Edge>, processed_addresses: &mut HashSet<usize>, heap_start: usize, heap_size: usize, json: &Value, is_iteration : bool) {
@@ -250,7 +266,7 @@ fn process_struct(heap_data: &[u8], pointer_address: usize, graph: &mut DiGraph<
     let mut struct_pointer = Pointer {
         label: format!("{:#x}", pointer_address),
         struct_size: struct_size, // This will be set after confirming the struct size
-        cat: if is_key_pointer(pointer_address, json) { 1 } else { 0 },
+        cat: is_key_pointer(pointer_address, json),
         valid_pointer_count: 0,
         invalid_pointer_count: 0,
         first_pointer_offset: -1,
@@ -331,7 +347,7 @@ fn get_node_by_address(graph: &mut DiGraph<Pointer, ()>, address: usize) -> Node
     panic!("Node not found");
 }
 
-fn create_or_get_node(graph: &mut DiGraph<Pointer, Edge>, address: usize, struct_size: usize, label: String, is_key : bool) -> NodeIndex {
+fn create_or_get_node(graph: &mut DiGraph<Pointer, Edge>, address: usize, struct_size: usize, label: String, is_key : i8) -> NodeIndex {
 
 
     // Check if a node for this address already exists
@@ -347,7 +363,7 @@ fn create_or_get_node(graph: &mut DiGraph<Pointer, Edge>, address: usize, struct
     let pointer = Pointer {
         label: label,
         struct_size,
-        cat: if is_key { 1 } else { 0 },
+        cat: is_key,
         valid_pointer_count: 0,
         invalid_pointer_count: 0,
         first_pointer_offset: -1,
@@ -445,7 +461,7 @@ fn get_struct_size(heap_data: &[u8], pointer_address: usize, heap_start: usize, 
 struct Pointer {
     label: String,                  // A descriptive label for the struct
     struct_size: usize,             // The size of the struct in bytes
-    cat: u8,                        // Category flag (1 for Key, 0 otherwise)
+    cat: i8,                        // Category flag (1 for Key, 0 otherwise)
     valid_pointer_count: usize,     // Count of valid pointers within the struct
     invalid_pointer_count: usize,   // Count of invalid pointers within the struct
     first_pointer_offset: isize,    // Offset of the first pointer in the struct can be negative

@@ -51,10 +51,10 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e4)  # replay buffer size
+BUFFER_SIZE = int(1e5)  # replay buffer size
 BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 0.01              # soft update of target parameters
+TAU = 0.003              # soft update of target parameters
 LR = 0.01               # learning rate
 UPDATE_EVERY = 20        # how often to update the network
 
@@ -80,17 +80,19 @@ def test_for_graph(file):
     graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
-    target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
+    targets = define_targets(graph)
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE)
+    env = GraphTraversalEnv(graph, targets,ACTION_SPACE)
     check_parameters(env)
 
     
     total_key_found = 0
     mean_reward = 0
 
-    for goal in range(len(target_nodes)):
+    goals = list(targets.values())
+
+    for goal in goals:
         one_hot_goal = create_one_hot_goal(goal)
         observation = env.reset()
         done = False
@@ -112,9 +114,9 @@ def test_for_graph(file):
             
             observation = new_observation
         mean_reward += episode_reward
-    mean_reward /= len(target_nodes)
+    mean_reward /= len(targets)
     
-    return mean_reward, total_key_found, len(target_nodes)
+    return mean_reward, total_key_found, len(targets)
 
   
 
@@ -138,20 +140,31 @@ INIT_EPS = 0.98
 EPS_DECAY = 0.9999
 MIN_EPS = 0.01
 
+
+def define_targets(graph):
+    target_nodes_map = {}
+    for node, attributes in graph.nodes(data=True):
+        if attributes['cat'] >= 0:
+            target_nodes_map[node] = attributes['cat'] 
+    return target_nodes_map
+
+
 def execute_for_graph(file, training = True):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
-    target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
+
+    targets = define_targets(graph)
+
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE)
+    env = GraphTraversalEnv(graph, targets,ACTION_SPACE)
 
     check_parameters(env)
     windowed_success = 0
 
-    num_episode_multiplier = len(target_nodes)
+    num_episode_multiplier = len(targets)
     num_episodes = 300 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
@@ -167,8 +180,9 @@ def execute_for_graph(file, training = True):
     
     for episode in range_episode:
         
-        #get a random index goal from 0 to len(target_nodes) - 1 included
-        goal = random.randint(0, len(target_nodes) - 1)
+        #get a random index goal from the target map
+        goal = random.choice(list(targets.keys()))
+        goal = targets[goal]
         goal_one_hot = create_one_hot_goal(goal)
 
         observation = env.reset()

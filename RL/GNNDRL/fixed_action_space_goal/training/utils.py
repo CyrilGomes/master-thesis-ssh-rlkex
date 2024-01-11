@@ -40,8 +40,6 @@ def convert_types(G):
 
         # Convert cat to an integer and ensure it's within the range of a byte (0-255)
         data['cat'] = int(data['cat'])
-        if not (0 <= data['cat'] <= 255):
-            raise ValueError(f"Value of 'cat' out of range for u8: {data['cat']}")
 
     #Same for edges attributes (offset)
     for u, v, data in G.edges(data=True):

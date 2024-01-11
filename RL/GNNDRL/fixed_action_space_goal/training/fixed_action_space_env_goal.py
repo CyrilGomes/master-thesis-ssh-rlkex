@@ -48,7 +48,6 @@ class GraphTraversalEnv(gym.Env):
         self._validate_graph(graph)
         self.main_graph = graph
 
-
         self.target_nodes = target_nodes
         self.shortest_path_cache = {}
         self.visited_stack = []
@@ -131,6 +130,7 @@ class GraphTraversalEnv(gym.Env):
 
         #check if there is a path from root to all target nodes
         has_path = {}
+        print(self.target_nodes)
         for target in self.target_nodes:
             try:
                 path = nx.shortest_path(best_subgraph, best_root, target)
@@ -162,10 +162,10 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 20
-        self.STEP_PENALTY = -0.2
-        self.PROXIMITY_MULTIPLIER = 1.5
-        self.INCORRECT_LEAF_PENALTY = -1
+        self.TARGET_FOUND_REWARD = 1
+        self.STEP_PENALTY = -0.01
+        self.PROXIMITY_MULTIPLIER = 1
+        self.INCORRECT_LEAF_PENALTY = 0
 
 
 
@@ -334,32 +334,43 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             int or None: Distance to the goal node or None if no path exists.
         """
-        #get the goalth target node
-        target_node = self.target_nodes[goal]
+
+
         # If no path exists, return None.
         try:
             # Check if the path is in the cache
-            if (self.current_node, target_node) in self.path_cache:
-                return self.path_cache[(self.current_node, target_node)]
+            if (self.current_node, self.target_node ) in self.path_cache:
+                return self.path_cache[(self.current_node, self.target_node )]
             
-            path = nx.shortest_path(self.graph, self.current_node, target_node)
+            path = nx.shortest_path(self.graph, self.current_node, self.target_node )
             dist = len(path) - 1
 
             # Store the path length in the cache
-            self.path_cache[(self.current_node, target_node)] = dist
+            self.path_cache[(self.current_node, self.target_node )] = dist
         
 
             return dist
         except nx.NetworkXNoPath:
             return None
 
+    def _set_target_node_goal(self, goal):
+        self.target_node = None
+        for target in self.target_nodes:
+            value = self.target_nodes[target]
+            if value == goal:
+                self.target_node = target
+                break
+
+        if self.target_node is None:
+            raise ValueError(f"Goal {goal} is out of range for target nodes {self.target_nodes}")
+        return self.target_node 
+                
+        
 
     def step(self, action, goal):
-        
         #goal is a number defining the target node (0, 1, 2, 3, etc...)
         #check if the goal is a valid target node
-        if goal >= len(self.target_nodes):
-            raise ValueError(f"Goal {goal} is out of range for target nodes {self.target_nodes}")
+        self._set_target_node_goal(goal)
 
 
         #check if has neighbors
@@ -379,7 +390,7 @@ class GraphTraversalEnv(gym.Env):
         is_incorect_leaf = self.graph.out_degree(self.current_node) == 0 and not has_path
 
 
-        has_found_target = self.current_node == self.target_nodes[goal]
+        has_found_target = self.current_node == self.target_node 
 
         reward = compute_reward(has_found_target, self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.INCORRECT_LEAF_PENALTY, is_incorect_leaf)
         

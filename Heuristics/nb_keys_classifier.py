@@ -75,7 +75,7 @@ def graph_to_data(graph):
 
     edge_attr = torch.tensor([data['offset'] for u, v, data in graph.edges(data=True)], dtype=torch.float).unsqueeze(1)
     # if there are 2 keys then y = 0, if there are 4 keys then y = 1, if there are 6 keys then y = 2
-    key_count = len([node for node in graph.nodes() if graph.nodes[node]['cat'] == 1])
+    key_count = len([node for node in graph.nodes() if graph.nodes[node]['cat'] >= 0])
 
     #Create a tensor [1,0,0] if there are 2 keys, [0,1,0] if there are 4 keys, [0,0,1] if there are 6 keys
     if key_count == 2:
@@ -113,8 +113,7 @@ def convert_types(G):
 
         # Convert cat to an integer and ensure it's within the range of a byte (0-255)
         data['cat'] = int(data['cat'])
-        if not (0 <= data['cat'] <= 255):
-            raise ValueError(f"Value of 'cat' out of range for u8: {data['cat']}")
+
 
     # Convert edges to their corresponding types
     for u, v, data in G.edges(data=True):

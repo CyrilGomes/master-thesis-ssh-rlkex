@@ -64,10 +64,9 @@ def convert_types(G):
         data['last_valid_pointer_offset'] = int(data['last_valid_pointer_offset'])
         data['address'] = int(data['address'])
 
-        # Convert cat to an integer and ensure it's within the range of a byte (0-255)
+
         data['cat'] = int(data['cat'])
-        if not (0 <= data['cat'] <= 255):
-            raise ValueError(f"Value of 'cat' out of range for u8: {data['cat']}")
+
     return G
 
 
@@ -75,7 +74,7 @@ def generate_single_graph_data(G):
     """ Generate data for a single graph with multiple root nodes. """
 
     #get the target nodes by getting all nodes that has feature 'cat' == 1
-    target_nodes = [node for node, attributes in G.nodes(data=True) if attributes['cat'] == 1]
+    target_nodes = [node for node, attributes in G.nodes(data=True) if attributes['cat'] >= 0]
 
 
     #get root nodes by gettinng all nodes that has no predecessors
