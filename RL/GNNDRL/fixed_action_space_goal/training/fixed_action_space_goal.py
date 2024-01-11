@@ -152,7 +152,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 10000 if training else 2
+    num_episodes = 300 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf

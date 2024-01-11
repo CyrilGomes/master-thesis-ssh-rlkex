@@ -11,10 +11,11 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 from torch.optim import Adam
 
-class GraphQNetwork(torch.nn.Module):
+class GATConvDQL(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, num_actions, seed):
-        super(GraphQNetwork, self).__init__()
+        super(GATConvDQL, self).__init__()
         self.seed = torch.manual_seed(seed)
+
         self.embedding_size = 3
         self.heads = 2
         # Define GAT layers
@@ -40,7 +41,6 @@ class GraphQNetwork(torch.nn.Module):
 
     def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None):  
 
-        
         #ensure everything is on device
         x = x
         x0 = x
@@ -95,8 +95,6 @@ class GraphQNetwork(torch.nn.Module):
 
 
         qvals = qvals.masked_fill(action_mask == 0, -1e8)
-
-
 
 
         #check if qvals contains nan

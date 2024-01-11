@@ -25,6 +25,8 @@ from panconv_dql import PANConcDQL
 from utils import MyGraphData
 from per import SumTree, Memory
 
+from gatconv_dql import GATConvDQL
+
 
 
 # -------------------------
@@ -47,8 +49,8 @@ class Agent:
 
 
         # Q-Network
-        self.qnetwork_local = PANConcDQL(state_size, self.edge_attr_size, action_space, seed).to(device)
-        self.qnetwork_target = PANConcDQL(state_size,self.edge_attr_size,action_space, seed).to(device)
+        self.qnetwork_local = GATConvDQL(state_size, self.edge_attr_size, action_space, seed).to(device)
+        self.qnetwork_target = GATConvDQL(state_size,self.edge_attr_size,action_space, seed).to(device)
 
         #init the weights of the target network to be the same as the local network
         self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
@@ -64,6 +66,9 @@ class Agent:
         self.t_step = 0
 
         self.losses = []
+        self.td_errors = []
+
+        self.is_weights = []
         self.steps = 0
 
         self.is_ready = False
@@ -143,7 +148,6 @@ class Agent:
                 selected_action = np.random.choice(np.arange(len(weight_array)), p=weight_array)
             else:
                 choices = (action_mask.cpu() == 1).nonzero(as_tuple=True)[0]
-
                 selected_action = np.random.choice(choices)
             return selected_action
     
@@ -272,6 +276,8 @@ class Agent:
             self.buffer.batch_update(b_exp_indices, td_error)
 
             self.losses.append(loss.item())
+            self.td_errors.append(td_error.mean())
+            self.is_weights.append(b_is_weight.mean().item())
 
 
 

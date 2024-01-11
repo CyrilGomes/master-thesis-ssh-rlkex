@@ -11,9 +11,9 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 from torch.optim import Adam
 
-class GraphQNetwork(torch.nn.Module):
+class GATConvDQL(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, num_actions, seed):
-        super(GraphQNetwork, self).__init__()
+        super(GATConvDQL, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.embedding_size = 3
         self.heads = 2
@@ -30,13 +30,13 @@ class GraphQNetwork(torch.nn.Module):
 
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(self.embedding_size*self.heads*3 + num_node_features, 16)
-        self.value_2 = torch.nn.Linear(16, 8)
-        self.value = torch.nn.Linear(8, 1)
+        self.value_stream = torch.nn.Linear(self.embedding_size*self.heads*2 + num_node_features, 16)
+        self.value_2 = torch.nn.Linear(16, 16)
+        self.value = torch.nn.Linear(16, 1)
 
-        self.advantage_stream = torch.nn.Linear(self.embedding_size*self.heads*3 + num_node_features, 64)
-        self.advantage_2 = torch.nn.Linear(64, 64)
-        self.advantage = torch.nn.Linear(64, num_actions)
+        self.advantage_stream = torch.nn.Linear(self.embedding_size*self.heads*2 + num_node_features, 32)
+        self.advantage_2 = torch.nn.Linear(32, 32)
+        self.advantage = torch.nn.Linear(32, num_actions)
 
     def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None):  
 
@@ -61,9 +61,9 @@ class GraphQNetwork(torch.nn.Module):
         x = F.dropout(x, p=0.5, training=self.training)
         x2 = x
         #x, edge_index, edge_attr, batch, _, _ = self.topkpool2(x, edge_index, edge_attr, batch=batch)
-        x = F.relu(self.norm3(self.conv3(x, edge_index, edge_attr)))
-        x = F.dropout(x, p=0.5, training=self.training)
-        x3 = x
+        #x = F.relu(self.norm3(self.conv3(x, edge_index, edge_attr)))
+        #x = F.dropout(x, p=0.5, training=self.training)
+        #x3 = x
         #x, edge_index, edge_attr, batch, _, _ = self.topkpool3(x, edge_index, edge_attr, batch=batch)
 
 
@@ -72,21 +72,21 @@ class GraphQNetwork(torch.nn.Module):
         x0 = x0[global_node_indices]
         x1 = x1[global_node_indices]
         x2 = x2[global_node_indices]
-        x3 = x3[global_node_indices]
+        #x3 = x3[global_node_indices]
 
-        x = torch.cat((x0, x1, x2, x3), dim=1)
+        x = torch.cat((x0, x1, x2), dim=1)
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x))
         advantage = F.dropout(advantage, p=0.5, training=self.training)
-        advantage = F.relu(self.advantage_2(advantage))
-        advantage = F.dropout(advantage, p=0.5, training=self.training)
+        #advantage = F.relu(self.advantage_2(advantage))
+        #advantage = F.dropout(advantage, p=0.5, training=self.training)
         advantage = self.advantage(advantage)
         #advantage should be of shape [num_graphs, num_actions]
 
         value = F.relu(self.value_stream(x))
         value = F.dropout(value, p=0.5, training=self.training)
-        value = F.relu(self.value_2(value))
-        value = F.dropout(value, p=0.5, training=self.training)
+        #value = F.relu(self.value_2(value))
+        #value = F.dropout(value, p=0.5, training=self.training)
         value = self.value(value)
         #value should be of shape [num_graphs, 1]
 
