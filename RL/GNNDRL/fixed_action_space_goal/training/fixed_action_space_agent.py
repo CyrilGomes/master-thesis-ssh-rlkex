@@ -21,7 +21,7 @@ from torch.optim import Adam
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import random
-from gatconv_goal_dql import GATConcDQL
+from RL.GNNDRL.fixed_action_space_goal.training.panconv_goal_dql import PANConcDQL
 from utils import MyGraphData
 from per import SumTree, Memory
 
@@ -31,8 +31,8 @@ from per import SumTree, Memory
 # AGENT DEFINITION
 # -------------------------
 class Agent:
-    def __init__(self, state_size, goal_size, edge_attr_size, action_space, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_PAN_CONV_GOAL')  # Choose an appropriate experiment name
+    def __init__(self, state_size, edge_attr_size, action_space, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
+        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_PAN_CONV')  # Choose an appropriate experiment name
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
@@ -45,10 +45,10 @@ class Agent:
         self.update_every = update_every
         self.action_space = action_space
 
-        self.goal_size = 6
+
         # Q-Network
-        self.qnetwork_local = GATConcDQL(state_size, self.edge_attr_size, action_space, self.goal_size, seed).to(device)
-        self.qnetwork_target = GATConcDQL(state_size,self.edge_attr_size,action_space, self.goal_size, seed).to(device)
+        self.qnetwork_local = PANConcDQL(state_size, self.edge_attr_size, action_space, seed).to(device)
+        self.qnetwork_target = PANConcDQL(state_size,self.edge_attr_size,action_space, seed).to(device)
 
         #init the weights of the target network to be the same as the local network
         self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
@@ -57,23 +57,22 @@ class Agent:
 
         self.optimizer = Adam(self.qnetwork_local.parameters(), lr=lr)
 
-        self.experience = namedtuple("Experience", field_names=["state", "action", "goal", "reward", "next_state", "done", "action_mask", "next_action_mask"])
+        self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done", "action_mask", "next_action_mask"])
         
         self.buffer = Memory(capacity=buffer_size)
         
         self.t_step = 0
 
         self.losses = []
-        self.is_weights = []
         self.steps = 0
 
         self.is_ready = False
 
 
 
-    def add_experience(self, state, action, goal, reward, next_state, done, action_mask, next_action_mask):        
+    def add_experience(self, state, action, reward, next_state, done, action_mask, next_action_mask):        
         """Add a new experience to memory."""
-        experience = self.experience(state, action, goal, reward, next_state, done, action_mask, next_action_mask)
+        experience = self.experience(state, action, reward, next_state, done, action_mask, next_action_mask)
         #check if there is None in experience
         for key, value in experience._asdict().items():
             if value is None:
@@ -92,14 +91,14 @@ class Agent:
 
 
 
-    def step(self, state, action, goal, reward, next_state, done, action_mask=None, next_action_mask=None):
+    def step(self, state, action, reward, next_state, done, action_mask=None, next_action_mask=None):
         self.steps += 1
         #ensure everything is on device
         state = state
         next_state = next_state
         
         # Save experience in replay memory
-        self.add_experience(state, action, goal, reward, next_state, done, action_mask, next_action_mask)
+        self.add_experience(state, action, reward, next_state, done, action_mask, next_action_mask)
         
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % self.update_every
@@ -111,7 +110,7 @@ class Agent:
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
 
-    def act(self, state, goal, eps=0, action_mask=None, weight_array=None):
+    def act(self, state, eps=0, action_mask=None, weight_array=None):
         state = state
         action_mask = torch.from_numpy(action_mask)
 
@@ -121,10 +120,9 @@ class Agent:
             curr_node = state.current_node_id
             edge_index = state.edge_index.to(self.device)
             edge_attr = state.edge_attr.to(self.device)
-            goal = goal.to(self.device)
 
             with torch.no_grad():  # Wrap in no_grad
-                action_values = self.qnetwork_local(x, edge_index, edge_attr, None, curr_node, action_mask, goal)
+                action_values = self.qnetwork_local(x, edge_index, edge_attr, None, curr_node, action_mask)
             return_values = action_values.cpu()
             self.qnetwork_local.train()
 
@@ -186,13 +184,12 @@ class Agent:
             is_weight = torch.tensor(is_weights[i][0])
             current_node_id = torch.tensor(e.state.current_node_id, dtype=torch.long)
             next_current_node_id = torch.tensor(e.next_state.current_node_id, dtype=torch.long)
-            goal_one_hot = e.goal
 
             data = MyGraphData(x_s=state.x, edge_index_s=state.edge_index, edge_attr_s=state.edge_attr,
                             action=action, reward=reward, x_t=next_state.x,
                             edge_index_t=next_state.edge_index, edge_attr_t=next_state.edge_attr,
                             done=done, exp_idx=exp_index, mask = mask, next_mask = next_mask, is_weight=is_weight, 
-                            cnid=current_node_id, next_cnid=next_current_node_id, goal_one_hot=goal_one_hot)
+                            cnid=current_node_id, next_cnid=next_current_node_id)
             
             
 
@@ -227,26 +224,25 @@ class Agent:
             b_is_weight = batch.is_weight.to(device)
             b_current_node_id = batch.cnid.to(device)
             b_next_current_node_id = batch.next_cnid.to(device)
-            b_goal_one_hot = batch.goal_one_hot.to(device)
 
             # Calculate Q values for next states
             with torch.no_grad():
 
                 #Double DQN
-                q_local_next = self.qnetwork_local(b_x_t, b_edge_index_t, b_edge_attr_t, x_t_batch, b_next_current_node_id, b_next_action_mask, b_goal_one_hot)
+                q_local_next = self.qnetwork_local(b_x_t, b_edge_index_t, b_edge_attr_t, x_t_batch, b_next_current_node_id, action_mask=b_next_action_mask)
                 #q_local_next is of shape [num_graphs, num_actions]
                 indices = torch.argmax(q_local_next, dim=1)
 
                 Q_targets_next = self.qnetwork_target(b_x_t, b_edge_index_t, 
                                                     b_edge_attr_t, x_t_batch, b_next_current_node_id,
-                                                    b_next_action_mask, b_goal_one_hot)
+                                                    action_mask=b_next_action_mask)
                 
                 
             Q_targets_next = Q_targets_next.gather(1, indices.unsqueeze(1)).squeeze(1)
 
             Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
 
-            Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, b_current_node_id, b_action_mask, b_goal_one_hot)
+            Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, b_current_node_id, action_mask=b_action_mask)
 
 
             #b_action is of shape [batch_size]
@@ -259,8 +255,7 @@ class Agent:
 
 
             td_error = torch.abs(Q_expected - Q_targets)
-            
-            loss = torch.mean(td_error.pow(2))
+            loss = torch.mean(b_is_weight * td_error.pow(2))
 
             # Backpropagation
             self.optimizer.zero_grad()
@@ -277,7 +272,6 @@ class Agent:
             self.buffer.batch_update(b_exp_indices, td_error)
 
             self.losses.append(loss.item())
-            self.is_weights.append(b_is_weight.mean().item())
 
 
 

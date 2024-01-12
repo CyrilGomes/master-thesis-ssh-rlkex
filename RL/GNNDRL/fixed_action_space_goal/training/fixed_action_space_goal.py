@@ -51,17 +51,17 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e5)  # replay buffer size
+BUFFER_SIZE = int(1e4)  # replay buffer size
 BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 0.003              # soft update of target parameters
+TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 20        # how often to update the network
+UPDATE_EVERY = 1        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 13
+STATE_SPACE = 11
 EDGE_ATTR_SIZE = 1
-ACTION_SPACE = 50
+ACTION_SPACE = 30
 GOAL_SPACE = 6
 agent = Agent(STATE_SPACE, GOAL_SPACE, EDGE_ATTR_SIZE, ACTION_SPACE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
 
@@ -165,7 +165,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(targets)
-    num_episodes = 300 if training else 2
+    num_episodes = 50 if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -240,7 +240,8 @@ def execute_for_graph(file, training = True):
             'Loss': agent.losses[-1] if len(agent.losses) > 0 else 0.0,
             'Epsilon': curr_eps,
             'NbMoves' : episode_stats["nb_of_moves"],
-            'success' : info["found_target"],
+            'Success' : info["found_target"],
+            'IS Weight' : agent.is_weights[-1] if len(agent.is_weights) > 0 else 0.0,
 
         }
         agent.log_metrics(metrics)
@@ -270,10 +271,7 @@ def visualize(rewards):
 
 
 
-#take random files from folder and execute
-nb_random_files = 20
 
-nb_try = 10
 
 EPS = INIT_EPS
 
@@ -284,30 +282,54 @@ for root, dirs, files in os.walk(FOLDER):
         if file.endswith(".graphml"):
             all_files.append(os.path.join(root, file))
 
+#take random files from folder and execute
+ratio_training_files = 0.8
 
-for curr_try in range( nb_try):
-    random_files = random.sample(all_files, nb_random_files)
-    i = 0
-    print(f"Try {curr_try + 1} / {nb_try}")
-    for file in random_files:
-        if file.endswith(".graphml"):
-            i+=1
-            print(f"[{i} / {nb_random_files}] : Executing Training for {file}")
-            execute_for_graph(file, True)
+
+
+#shuffle the files
+random.shuffle(all_files)
+
+nb_file_overall = 500
+all_files = all_files[:nb_file_overall]
+
+nb_files = len(all_files)
+nb_training_files = int(nb_files * ratio_training_files)
+nb_testing_files = int(nb_files * (1-ratio_training_files))
+
+
+training_files = all_files[:nb_training_files]
+testing_files = all_files[nb_training_files:]
+
+test_every = 10
+
+
+
+print(f"Executing Training ...")
+
+for i, file in enumerate(training_files):
+    if file.endswith(".graphml"):
+        print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
+        execute_for_graph(file, True)
+        if i % test_every == 0:
             print(f"Executing Testing for {file}")
             reward, nb_found_keys, nb_keys = test_for_graph(file)
             print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
-    print(f"Training done ")
 
+print(f"Training done ")
 
-    
+print(f"Executing Testing ...")
+test_rewards = []
+test_success_rate = []
+for i, file in enumerate(testing_files):
+    if file.endswith(".graphml"):
+        print(f"[{i} / {nb_testing_files}] : Executing Testing for {file}")
+        reward, nb_found_keys, nb_keys = test_for_graph(file)
+        print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+        test_rewards.append(reward)
+        test_success_rate.append(nb_found_keys / nb_keys)
 
-#take random file from folder and execute
-random_file = random.choice(all_files)
-print(f"Executing Testing for {random_file}")
-rewards, succes_rate = execute_for_graph(random_file, False)
-print(f"Success rate : {succes_rate}")
-#visualize(rewards)
+print(f"Testing done with a mean reward of {np.mean(test_rewards)} and a success rate of {np.mean(test_success_rate)}")
 
 
 # Save Model

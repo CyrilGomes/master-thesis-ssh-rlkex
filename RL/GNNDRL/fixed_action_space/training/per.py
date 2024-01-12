@@ -103,6 +103,7 @@ class Memory(object):  # stored as ( state, action, reward, next_state ) in SumT
 
             b_ISWeights[i, 0] = np.power((priority * n), -self.PER_b) / max_weight
             
+            
             b_idx[i]= index
 
             minibatch.append(data)

@@ -79,7 +79,7 @@ class GraphTraversalEnv(gym.Env):
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 13
+        self.state_size = 11
 
         self.observation_space = self._define_observation_space()
         self.nb_targets = len(self.target_nodes)
@@ -476,7 +476,7 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             Data: Initial observation data after resetting.
         """
-        self.graph = self.reference_graph.copy()
+        #self.graph = self.reference_graph.copy()
 
         self.current_node_iterator = 0
         self.current_node = self._sample_start_node()
@@ -507,13 +507,17 @@ class GraphTraversalEnv(gym.Env):
 
     def _get_obs(self):
 
+        #keep the subgraph (tree) that has the current node as root
+        subgraph = self.graph
 
-        node_mapping = {node: i for i, node in enumerate(self.graph.nodes())}
+
+
+        node_mapping = {node: i for i, node in enumerate(subgraph.nodes())}
 
         data_space_current_node_idx = node_mapping[self.current_node]
         # Use the node mapping to convert node indices
 
-        edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in self.graph.edges()], dtype=torch.long).t().contiguous()
+        edge_index = torch.tensor([(node_mapping[u], node_mapping[v]) for u, v in subgraph.edges()], dtype=torch.long).t().contiguous()
 
         #set the node "is_current" to 1 if it is the current node, 0 otherwise
         #set the number of keys found
@@ -522,7 +526,7 @@ class GraphTraversalEnv(gym.Env):
 
         num_nodes_in_graph = len(self.graph.nodes)
 
-        map_neighbour_to_index = {neighbour: i for i, neighbour in enumerate(self.graph.successors(self.current_node))}
+        map_neighbour_to_index = {neighbour: i for i, neighbour in enumerate(subgraph.successors(self.current_node))}
  
 
 
@@ -535,7 +539,7 @@ class GraphTraversalEnv(gym.Env):
                 count_visited[node] = 0
             count_visited[node] += 1
 
-        nb_neighbours = self.graph.out_degree(self.current_node)
+        nb_neighbours = subgraph.out_degree(self.current_node)
 
 
         x = torch.tensor([[
@@ -546,16 +550,15 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_pointer_offset'],
             attributes['first_valid_pointer_offset'],
             attributes['last_valid_pointer_offset'],
-            count_visited[node]/nb_nodes_visited if node in count_visited else 0,
-            self.nb_targets,
-            self.graph.out_degree(node),
+            #count_visited[node]/nb_nodes_visited if node in count_visited else 0,
+            subgraph.out_degree(node),
             num_nodes_in_graph,
             node == self.current_node,
             map_neighbour_to_index[node]/nb_neighbours if node in map_neighbour_to_index else -1, 
-        ] for node, attributes in self.graph.nodes(data=True)], dtype=torch.float)
+        ] for node, attributes in subgraph.nodes(data=True)], dtype=torch.float)
 
         
-        edge_attr = torch.tensor([data['offset'] for u, v, data in self.graph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        edge_attr = torch.tensor([data['offset'] for u, v, data in subgraph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
         
         """
 
