@@ -56,7 +56,7 @@ BATCH_SIZE = 64         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 1        # how often to update the network
+UPDATE_EVERY = 50        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
 STATE_SPACE = 11
@@ -138,7 +138,7 @@ def create_one_hot_goal( goal):
 
 INIT_EPS = 0.98
 EPS_DECAY = 0.9999
-MIN_EPS = 0.01
+MIN_EPS = 0.005
 
 
 def define_targets(graph):
@@ -165,7 +165,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(targets)
-    num_episodes = 50 if training else 2
+    num_episodes = 300 * num_episode_multiplier if training else 2
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -177,11 +177,12 @@ def execute_for_graph(file, training = True):
     keys_per_episode = []
 
     nb_moves_per_episode = []
-    
+    goal_choosen_counter = np.zeros(6)
     for episode in range_episode:
         
         #get a random index goal from the target map
         goal = random.choice(list(targets.keys()))
+        goal_choosen_counter[targets[goal]] += 1
         goal = targets[goal]
         goal_one_hot = create_one_hot_goal(goal)
 
@@ -244,6 +245,7 @@ def execute_for_graph(file, training = True):
             'IS Weight' : agent.is_weights[-1] if len(agent.is_weights) > 0 else 0.0,
 
         }
+
         agent.log_metrics(metrics)
 
 
@@ -252,7 +254,7 @@ def execute_for_graph(file, training = True):
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
 
-        
+
     return episode_rewards, stats["nb_success"] / num_episodes
 
         #if episode % 500 == 0:
@@ -283,14 +285,14 @@ for root, dirs, files in os.walk(FOLDER):
             all_files.append(os.path.join(root, file))
 
 #take random files from folder and execute
-ratio_training_files = 0.8
+ratio_training_files = 0.7
 
 
 
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 500
+nb_file_overall = 300
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)

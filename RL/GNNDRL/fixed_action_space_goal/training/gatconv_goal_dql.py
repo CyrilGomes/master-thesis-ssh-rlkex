@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, GraphNorm, TopKPooling, PANConv, PANPooling, global_mean_pool
-
+import torch_scatter
 class GATConcDQL(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, num_actions, goal_size, seed):
         super(GATConcDQL, self).__init__()
@@ -18,8 +18,10 @@ class GATConcDQL(torch.nn.Module):
         self.conv2 = GATv2Conv(self.embedding_size *self.heads , self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
         self.norm2 = GraphNorm(self.embedding_size * self.heads)
 
-        self.pooling = TopKPooling(self.embedding_size * self.heads, 0.8)
+        self.pooling = TopKPooling(self.embedding_size * self.heads, 0.5)
 
+        self.conv3 = GATv2Conv(self.embedding_size * self.heads, self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
+        self.norm3 = GraphNorm(self.embedding_size * self.heads)
         # Dueling DQN layers
         self.value_stream = torch.nn.Linear(self.embedding_size  + (self.embedding_size * self.heads)*2+ goal_size, 20)
         self.value = torch.nn.Linear(20, 1)
@@ -52,11 +54,21 @@ class GATConcDQL(torch.nn.Module):
         x = F.relu(self.norm1(x))
         x1 = x
 
-        x = self.conv2(x, edge_index)
+        #apply conv 2 with return attention weights
+        x,(edge_index, alpha) = self.conv2(x, edge_index, edge_attr, return_attention_weights=True)
         x = F.relu(self.norm2(x))
+        
+
+        node_level_attention = torch_scatter.scatter_add(alpha, edge_index[0], dim=0,dim_size=x.size(0))
+        if edge_attr.shape[0] != edge_index.shape[1]:
+            # Assuming edge_attr is initially correct, pad it to the correct length
+            padding = torch.zeros(edge_index.shape[1] - edge_attr.shape[0], edge_attr.shape[1]).to(edge_attr.device)
+            edge_attr = torch.cat([edge_attr, padding], dim=0)
+        x, edge_index, edge_attr, batch, _, _ = self.pooling(x, edge_index, edge_attr, batch=batch, attn = node_level_attention)
 
 
-        x, edge_index, edge_attr, batch, _, _ = self.pooling(x, edge_index, edge_attr, batch=batch)
+        x = self.conv3(x, edge_index, edge_attr)
+        x = F.relu(self.norm3(x))
 
         global_pool = global_mean_pool(x, batch)
 

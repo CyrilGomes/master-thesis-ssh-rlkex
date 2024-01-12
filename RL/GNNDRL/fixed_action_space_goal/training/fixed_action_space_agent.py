@@ -265,13 +265,17 @@ class Agent:
             torch.cuda.empty_cache()
             # Soft update target network
 
-            self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
+            if self.t_step % self.update_every*5 == 0:
+                self.hard_update(self.qnetwork_local, self.qnetwork_target)
 
             # Update priorities, losses for logging, etc.
             td_error = td_error.detach().cpu().numpy()
             self.buffer.batch_update(b_exp_indices, td_error)
 
             self.losses.append(loss.item())
+
+    def hard_update(self, local_model, target_model):
+        target_model.load_state_dict(local_model.state_dict())
 
 
 
