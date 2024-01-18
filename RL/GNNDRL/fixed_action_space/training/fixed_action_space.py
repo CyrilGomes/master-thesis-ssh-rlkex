@@ -220,12 +220,21 @@ INIT_EPS = 0.98
 EPS_DECAY = 0.9999
 MIN_EPS = 0.01
 
+def define_targets(graph):
+    target_nodes_map = {}
+    for node, attributes in graph.nodes(data=True):
+        if attributes['cat'] >= 0:
+            target_nodes_map[node] = attributes['cat'] 
+    return target_nodes_map
+
+
+
 def execute_for_graph(file, random_walk_training = True):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
-    target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
+    target_nodes = define_targets(graph)
     episode_rewards = []
     #data = graph_to_data(graph)
     env = GraphTraversalEnv(graph, target_nodes,ACTION_SPACE, obs_is_full_graph=True)

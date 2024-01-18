@@ -292,7 +292,7 @@ ratio_training_files = 0.7
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 300
+nb_file_overall = 50
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)

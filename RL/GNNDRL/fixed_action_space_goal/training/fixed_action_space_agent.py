@@ -32,7 +32,7 @@ from per import SumTree, Memory
 # -------------------------
 class Agent:
     def __init__(self, state_size, edge_attr_size, action_space, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_PAN_CONV')  # Choose an appropriate experiment name
+        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_GAT_CONV')  # Choose an appropriate experiment name
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size

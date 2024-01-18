@@ -22,12 +22,15 @@ class GATConcDQL(torch.nn.Module):
 
         self.conv3 = GATv2Conv(self.embedding_size * self.heads, self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
         self.norm3 = GraphNorm(self.embedding_size * self.heads)
-        # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(self.embedding_size  + (self.embedding_size * self.heads)*2+ goal_size, 20)
-        self.value = torch.nn.Linear(20, 1)
 
-        self.advantage_stream = torch.nn.Linear(self.embedding_size  + (self.embedding_size * self.heads)*2 + goal_size, num_actions//2)
-        self.advantage = torch.nn.Linear(num_actions//2, num_actions)
+        self.state_embedder = torch.nn.Linear(self.embedding_size  + (self.embedding_size * self.heads)*2, self.embedding_size)
+
+        # Dueling DQN layers
+        self.value_stream = torch.nn.Linear(self.embedding_size + goal_size, 10)
+        self.value = torch.nn.Linear(10, 1)
+
+        self.advantage_stream = torch.nn.Linear(self.embedding_size + goal_size, 10)
+        self.advantage = torch.nn.Linear(10, num_actions)
 
     def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None, one_hot_goal=None):  
 
@@ -83,7 +86,12 @@ class GATConcDQL(torch.nn.Module):
 
         x1 = x1[global_node_indices]
 
-        x = torch.cat((x0, x1, global_pool, one_hot_goal), dim=1)
+        state = torch.cat((x0, x1, global_pool), dim=1)
+        state = F.relu(self.state_embedder(state))
+        
+
+        x = torch.cat((state, one_hot_goal), dim=1)
+        
 
         
 

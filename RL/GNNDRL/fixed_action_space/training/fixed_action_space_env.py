@@ -305,7 +305,7 @@ class GraphTraversalEnv(gym.Env):
 
         #get a random path from the current node to a unvisited target
 
-        #get all the unvisited targets
+        #get all the unvisited targets, target_nodes is a map, so we have to get the values, not the keys
         reachable_unvisited_targets = [target for target in self.target_nodes if target not in self.visited_keys and self._get_path_length(self.current_node, target) is not None]
         
         if len(reachable_unvisited_targets) == 0:
@@ -505,7 +505,9 @@ class GraphTraversalEnv(gym.Env):
         self.current_node = self._sample_start_node()
         self.current_subtree_root = self.current_node
         self.visited_stack = []
+        
         self.visited_keys = set()
+        
         self.nb_actions_taken = 0
         self.observation_space = self._define_observation_space()
 
