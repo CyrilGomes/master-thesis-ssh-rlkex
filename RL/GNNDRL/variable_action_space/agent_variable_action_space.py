@@ -43,8 +43,6 @@ class GraphQNetwork(torch.nn.Module):
         self.norm3 = GraphNorm(3)
 
 
-
-
         # DiffPool layer
 
 
@@ -127,7 +125,6 @@ class GraphQNetwork(torch.nn.Module):
 
 
         value_input = torch.cat([pooled_max_3, pooled_mean_3, pooled_add_3], dim=0)
-        print(f"Value input : {value_input}")
         #combined_features = torch.cat([pooled_val, x_conc], dim=-1)
         value = F.relu(self.value_stream(value_input))
         value = self.dropout(value)
@@ -160,7 +157,6 @@ class GraphQNetwork(torch.nn.Module):
             #keep only the qvals of the masked actions
             filtered_actions = (advantage - expanded_mean_advantage)[batch == i][graph_mask == 1]
 
-            print(f"Advantages for graph {i} : {filtered_actions}")
 
         # Apply action mask if provided
         if action_mask is not None:
@@ -416,7 +412,7 @@ class Agent:
 
 
             td_error = torch.abs(Q_expected - Q_targets)
-            loss = torch.mean(b_is_weight * td_error.pow(2))
+            loss = torch.mean(td_error.pow(2))
 
             # Backpropagation
             self.optimizer.zero_grad()
@@ -426,8 +422,6 @@ class Agent:
             torch.cuda.empty_cache()
             # Soft update target network
 
-            for i, error in enumerate(td_error):
-                print(f"Reward of experience : {b_reward[i]} , TD error : {error} index : {b_exp_indices[i]}")
 
             self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 

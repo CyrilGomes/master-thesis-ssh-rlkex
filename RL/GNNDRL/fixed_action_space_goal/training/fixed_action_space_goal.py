@@ -51,15 +51,15 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e4)  # replay buffer size
-BATCH_SIZE = 64         # batch size
-GAMMA = 0.99            # discount factor
+BUFFER_SIZE = int(2e5)  # replay buffer size
+BATCH_SIZE = 256         # batch size
+GAMMA = 0.98            # discount factor
 TAU = 0.01              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 50        # how often to update the network
+UPDATE_EVERY = 10        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 11
+STATE_SPACE = 8
 EDGE_ATTR_SIZE = 1
 ACTION_SPACE = 30
 GOAL_SPACE = 6
@@ -149,7 +149,7 @@ def define_targets(graph):
     return target_nodes_map
 
 
-def execute_for_graph(file, training = True):
+def execute_for_graph(file, training = True, use_global_exploration = False):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
 
@@ -178,6 +178,8 @@ def execute_for_graph(file, training = True):
 
     nb_moves_per_episode = []
     goal_choosen_counter = np.zeros(6)
+
+
     for episode in range_episode:
         
         #get a random index goal from the target map
@@ -194,12 +196,14 @@ def execute_for_graph(file, training = True):
         if not agent.is_ready:
             curr_eps = 1
         else:
-            global EPS 
-            if training:
+
+            if not use_global_exploration:
+                curr_eps = 1 - (episode / num_episodes)
+            else:
+                global EPS 
                 EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
             
-            #a function of episode over num_epsiode, such that at the end it is 0.05, linear
-            curr_eps = EPS
+                curr_eps = EPS
 
         curr_episode_rewards = []
         done = False
@@ -292,7 +296,7 @@ ratio_training_files = 0.7
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 50
+nb_file_overall = 400
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)

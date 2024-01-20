@@ -32,7 +32,7 @@ from per import SumTree, Memory
 # -------------------------
 class Agent:
     def __init__(self, state_size, goal_size, edge_attr_size, action_space, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_PAN_CONV_GOAL')  # Choose an appropriate experiment name
+        self.writer = SummaryWriter('runs/DQL_GRAPH_FIXED_ACTION_SPACE_GAT_CONV_GOAL')  # Choose an appropriate experiment name
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
@@ -67,7 +67,7 @@ class Agent:
         self.is_weights = []
         self.steps = 0
 
-        self.is_ready = False
+        self.is_ready = True
 
 
 
@@ -104,12 +104,14 @@ class Agent:
         # Learn every UPDATE_EVERY time steps.
         self.t_step = (self.t_step + 1) % self.update_every
         if self.t_step == 0:
-            if len(self.buffer) >= self.buffer_size:
-                if not self.is_ready:
-                    self.is_ready = True
-                    print("Agent is ready")
+            if self.is_ready:
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
+            elif len(self.buffer) >= self.buffer_size:
+                    self.is_ready = True
+                    print("Agent is ready")
+
+
 
     def act(self, state, goal, eps=0, action_mask=None, weight_array=None):
         state = state

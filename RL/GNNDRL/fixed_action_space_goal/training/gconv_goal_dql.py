@@ -1,33 +1,42 @@
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GATv2Conv, GraphNorm, TopKPooling, PANConv, PANPooling, global_mean_pool
+from torch_geometric.nn import GATv2Conv, GraphNorm, TopKPooling, PANConv, PANPooling, global_mean_pool, GraphConv
 import torch_scatter
-class GATConcDQL(torch.nn.Module):
+class GraphConvDQL(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, num_actions, goal_size, seed):
-        super(GATConcDQL, self).__init__()
+        super(GraphConvDQL, self).__init__()
         self.seed = torch.manual_seed(seed)
-        self.embedding_size = 5
+        self.embedding_size = 10
         self.heads = 1
 
-        # Define GATConv layers
-        self.conv1 = GATv2Conv(num_node_features, self.embedding_size, heads=self.heads, edge_dim=num_edge_features, add_self_loops=True, dropout=0.5)
-        #self.norm1 = GraphNorm(self.embedding_size * self.heads)
-        self.conv2 = GATv2Conv(self.embedding_size *self.heads , self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
-        #self.norm2 = GraphNorm(self.embedding_size * self.heads)
+        self.curr_node_embedder = torch.nn.Linear(num_node_features, self.embedding_size)
 
+        # Define GATConv layers
+        self.conv1 = GraphConv(num_node_features, self.embedding_size)
+        self.norm1 = GraphNorm(self.embedding_size * self.heads)
+        self.conv2 = GraphConv(self.embedding_size, self.embedding_size)
+        self.norm2 = GraphNorm(self.embedding_size * self.heads)
+
+        #self.pooling = TopKPooling(self.embedding_size * self.heads, 0.5)
+
+        #self.conv3 = GATv2Conv(self.embedding_size * self.heads, self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
+        #self.norm3 = GraphNorm(self.embedding_size * self.heads)
+
+        self.state_embedder = torch.nn.Linear(self.embedding_size  + (self.embedding_size)*2, self.embedding_size)
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(self.embedding_size *self.heads + self.embedding_size  + goal_size, 10)
+        self.value_stream = torch.nn.Linear(self.embedding_size+ goal_size, 10)
         self.value = torch.nn.Linear(10, 1)
 
-        self.advantage_stream = torch.nn.Linear(self.embedding_size *self.heads + self.embedding_size + goal_size,10)
+        self.advantage_stream = torch.nn.Linear(self.embedding_size + goal_size, 10)
         self.advantage = torch.nn.Linear(10, num_actions)
 
     def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None, one_hot_goal=None):  
 
         
         #ensure everything is on device
-
+        x = x
+        x0 = x
         edge_index = edge_index
         edge_attr = edge_attr
         action_mask = action_mask.to(x.get_device())
@@ -40,28 +49,41 @@ class GATConcDQL(torch.nn.Module):
         batch = batch.to(x.get_device())
 
         
+        #concatenate the goal into the node features based on the batch
+        
+        #one_hot_goal_batch = one_hot_goal[batch]
+        #x = torch.cat((x, one_hot_goal_batch), dim=1)
 
         # Process with GAT layers
 
         x = self.conv1(x, edge_index, edge_attr)
-        x = F.relu(x)
+        x = F.relu(self.norm1(x))
+        x1 = x
 
-        #apply conv 2 with return attention weights
+        #apply conv 2
         x = self.conv2(x, edge_index, edge_attr)
-        x = F.relu(x)
-        
+        x = F.relu(self.norm2(x))
 
- 
+
         global_pool = global_mean_pool(x, batch)
 
         cumulative_nodes = torch.cumsum(batch.bincount(), 0)
         global_node_indices = current_node_ids + torch.cat((torch.tensor([0], device=batch.device), cumulative_nodes[:-1]))
-        x = x[global_node_indices]
+        x0 = x0[global_node_indices]
+        x0 = F.relu(self.curr_node_embedder(x0))
 
-        state = torch.cat((x, global_pool), dim=1)
+
+        x1 = x1[global_node_indices]
+
+        #state = torch.cat((x0, x1, global_pool), dim=1)
+        #state = F.relu(self.state_embedder(state))
+        state = x1
 
         x = torch.cat((state, one_hot_goal), dim=1)
         
+
+        
+
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x))
         advantage = F.dropout(advantage, p=0.5, training=self.training)

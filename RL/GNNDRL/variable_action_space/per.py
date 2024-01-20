@@ -54,10 +54,10 @@ class SumTree:
 
 class Memory(object):  # stored as ( state, action, reward, next_state ) in SumTree
     PER_e = 0.01  # Hyperparameter that we use to avoid some experiences to have 0 probability of being taken
-    PER_a = 0.6  # Hyperparameter that we use to make a tradeoff between taking only exp with high priority and sampling randomly
+    PER_a = 0.8  # Hyperparameter that we use to make a tradeoff between taking only exp with high priority and sampling randomly
     PER_b = 0.4  # importance-sampling, from initial value increasing to 1
     
-    PER_b_increment_per_sampling = 0.001
+    PER_b_increment_per_sampling = 0.000001
     
     absolute_error_upper = 1.  # clipped abs error
 

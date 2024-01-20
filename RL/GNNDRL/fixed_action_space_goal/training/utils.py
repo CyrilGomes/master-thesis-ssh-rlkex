@@ -112,6 +112,8 @@ class MyGraphData(Data):
             return None
         if key == 'goal_one_hot':
             return None
+        if key == 'history':
+            return None
 
         
         return super().__cat_dim__(key, value, *args, **kwargs)

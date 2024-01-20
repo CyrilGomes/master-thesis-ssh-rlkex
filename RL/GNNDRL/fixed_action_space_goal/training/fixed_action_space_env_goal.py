@@ -79,7 +79,7 @@ class GraphTraversalEnv(gym.Env):
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
 
-        self.state_size = 11
+        self.state_size = 8
 
         self.observation_space = self._define_observation_space()
         self.nb_targets = len(self.target_nodes)
@@ -130,7 +130,6 @@ class GraphTraversalEnv(gym.Env):
 
         #check if there is a path from root to all target nodes
         has_path = {}
-        print(self.target_nodes)
         for target in self.target_nodes:
             try:
                 path = nx.shortest_path(best_subgraph, best_root, target)
@@ -162,7 +161,7 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 1
+        self.TARGET_FOUND_REWARD = 10
         self.STEP_PENALTY = -0.01
         self.PROXIMITY_MULTIPLIER = 1
         self.INCORRECT_LEAF_PENALTY = 0
@@ -527,6 +526,14 @@ class GraphTraversalEnv(gym.Env):
         num_nodes_in_graph = len(self.graph.nodes)
 
         map_neighbour_to_index = {neighbour: i for i, neighbour in enumerate(subgraph.successors(self.current_node))}
+
+        neighbours = list(subgraph.successors(self.current_node))
+        #sort those neighbours based on the value of 'offset" between the current node and the neighbour
+        neighbours_sorted = sorted(neighbours, key=lambda x: subgraph.edges[self.current_node, x]['offset'])
+        
+        #check if the ordering of neighbours and neighbours_sorted is the same, else throw an error
+        if neighbours != neighbours_sorted:
+            raise ValueError("Neighbours are not sorted correctly")
  
 
 
@@ -539,8 +546,7 @@ class GraphTraversalEnv(gym.Env):
                 count_visited[node] = 0
             count_visited[node] += 1
 
-        nb_neighbours = subgraph.out_degree(self.current_node)
-
+ 
 
         x = torch.tensor([[
             attributes['struct_size'],
@@ -550,34 +556,30 @@ class GraphTraversalEnv(gym.Env):
             attributes['last_pointer_offset'],
             attributes['first_valid_pointer_offset'],
             attributes['last_valid_pointer_offset'],
-            #count_visited[node]/nb_nodes_visited if node in count_visited else 0,
-            subgraph.out_degree(node),
-            num_nodes_in_graph,
-            node == self.current_node,
-            map_neighbour_to_index[node]/nb_neighbours if node in map_neighbour_to_index else -1, 
+            #add offset from curr node to neighbour, if node is neighbour
+            subgraph.edges[self.current_node, node]['offset'] if node in neighbours else 0,
+
         ] for node, attributes in subgraph.nodes(data=True)], dtype=torch.float)
 
+
+
+        #Convert the visited stack to a tensor of node features
+        visited_stack_tensor = torch.tensor([[
+            attributes['struct_size'],
+            attributes['valid_pointer_count'],
+            attributes['invalid_pointer_count'],
+            attributes['first_pointer_offset'],
+            attributes['last_pointer_offset'],
+            attributes['first_valid_pointer_offset'],
+            attributes['last_valid_pointer_offset'],
+        ] for node, attributes in subgraph.nodes(data=True) if node in self.visited_stack], dtype=torch.float)
+
+
         
-        edge_attr = torch.tensor([data['offset'] for u, v, data in subgraph.edges(data=True)], dtype=torch.float).unsqueeze(1)        # y is 1 if there's at least one node with cat=1 in the graph, 0 otherwise
+        edge_attr = torch.tensor([data['offset'] for u, v, data in subgraph.edges(data=True)], dtype=torch.float).unsqueeze(1)
+
+        #concatenate the edge feature "offset" from current node to each of its neighbours
         
-        """
-
-        # Normalize edge attributes
-        edge_attr_np = edge_attr.numpy()
-        edge_attr_np = (edge_attr_np - np.mean(edge_attr_np, axis=0)) / np.std(edge_attr_np, axis=0)
-        edge_attr = torch.tensor(edge_attr_np, dtype=torch.float)
-        """
-        """
-        # Standardize features (subtract mean, divide by standard deviation), ignore the last two features
-        x_np = x.numpy()
-        eps = 1e-8
-        x_np[:, :-2] = (x_np[:, :-2] - np.mean(x_np[:, :-2] , axis=0)) / (np.std(x_np[:, :-2] , axis=0) + eps)
-        """
-
-        # Convert back to tensor
-        #x = torch.tensor(x_np, dtype=torch.float)
-        # Check if the shape of x matches self.state_size
-
 
 
         transform = T.Compose([
@@ -593,14 +595,17 @@ class GraphTraversalEnv(gym.Env):
 
         
 
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, current_node_id = data_space_current_node_idx)
-        data = transform(data)
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, current_node_id = data_space_current_node_idx, history =visited_stack_tensor)
+        #data = transform(data)
 
         if data.x.shape[1] != self.state_size:
             raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
         
 
         return data
+    
+
+    
 
     def close(self):
         pass

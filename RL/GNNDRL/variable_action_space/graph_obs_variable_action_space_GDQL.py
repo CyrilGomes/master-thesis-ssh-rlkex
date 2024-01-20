@@ -51,7 +51,7 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e2)  # replay buffer size
+BUFFER_SIZE = int(1e4)  # replay buffer size
 BATCH_SIZE = 32         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.005              # soft update of target parameters
@@ -59,7 +59,7 @@ LR = 0.01               # learning rate
 UPDATE_EVERY = 10        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
-STATE_SPACE = 14
+STATE_SPACE = 19
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
 
@@ -82,7 +82,7 @@ def test_for_graph(file):
     graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
-    target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
+    target_nodes = define_targets(graph=graph)
     episode_rewards = []
     #data = graph_to_data(graph)
     env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
@@ -113,15 +113,23 @@ def test_for_graph(file):
 
 
 INIT_EPS = 0.98
-EPS_DECAY = 0.9999
+EPS_DECAY = 0.99999
 MIN_EPS = 0.05
+
+def define_targets(graph):
+    target_nodes_map = {}
+    for node, attributes in graph.nodes(data=True):
+        if attributes['cat'] >= 0:
+            target_nodes_map[node] = attributes['cat'] 
+    return target_nodes_map
+
 
 def execute_for_graph(file, training = True):
     graph = nx.read_graphml(file)
     graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
-    target_nodes = [node for node, attributes in graph.nodes(data=True) if attributes['cat'] == 1]
+    target_nodes = define_targets(graph=graph)
     episode_rewards = []
     #data = graph_to_data(graph)
     env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
