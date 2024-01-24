@@ -25,6 +25,17 @@ import random
 from utils import MyGraphData
 from per import SumTree, Memory
 
+class DynamicWeightModule(torch.nn.Module):
+    def __init__(self, goal_dim, layer_dim):
+        super(DynamicWeightModule, self).__init__()
+        self.fc1 = torch.nn.Linear(goal_dim, layer_dim)
+        self.fc2 = torch.nn.Linear(layer_dim, layer_dim)  # Assuming square weight matrix for simplicity
+
+    def forward(self, goal):
+        goal_weight = F.relu(self.fc1(goal))
+        goal_weight = self.fc2(goal_weight)
+        return goal_weight
+
 
 class GraphQNetwork(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, seed):
@@ -32,23 +43,46 @@ class GraphQNetwork(torch.nn.Module):
         self.seed = torch.manual_seed(seed)
 
         # Define GAT layers
-        self.conv1 = GATv2Conv(num_node_features, num_node_features, edge_dim=num_edge_features, dropout=0.5)
-        self.norm1 = GraphNorm(num_node_features)
-        self.conv2 = GATv2Conv(num_node_features, num_node_features, edge_dim=num_edge_features, dropout=0.5)
-        self.norm2 = GraphNorm(num_node_features)
-        self.conv3 = GATv2Conv(num_node_features, num_node_features, edge_dim=num_edge_features, dropout=0.5)
-        self.norm3 = GraphNorm(num_node_features)
+        self.norm0 = GraphNorm(num_node_features)
+        dynamic_weight_module0 = DynamicWeightModule(6, num_node_features)
 
-        self.graph_embedder = torch.nn.Linear(7, 7)
-        self.subgraph_embedder = torch.nn.Linear(10, 10)
+        self.conv1 = GATv2Conv(num_node_features , 10, edge_dim=num_edge_features, heads=2)
+        self.dynamic_weight_module1 = DynamicWeightModule(6, 27)
+        self.conv2 = GATv2Conv(27, 20, edge_dim=num_edge_features, heads=2)
+        self.dynamic_weight_module2 = DynamicWeightModule(6, 67)
+
+        self.conv3 = GATv2Conv(67, 30, edge_dim=num_edge_features)
+        self.dynamic_weight_module3 = DynamicWeightModule(6, 97)
+
+        self.conv4 = GATv2Conv(97, 20, edge_dim=num_edge_features)
+        self.dynamic_weight_module4 = DynamicWeightModule(6, 117)
+
+        self.conv5 = GATv2Conv(117, 10, edge_dim=num_edge_features)
+        self.dynamic_weight_module5 = DynamicWeightModule(6, 127)
+
+
+        self.dynamic_weight_module = DynamicWeightModule(6, num_node_features)
+
+        self.node_embedder = torch.nn.Linear(127, 5)
+
+        self.edge_embedder = torch.nn.Linear(1, 1)
+        self.graph_embedder = torch.nn.Linear(127, 5)
+        self.subgraph_embedder = torch.nn.Linear(127, 5)
+
+        self.goal_advantage = torch.nn.Linear(11, 1)
+
+
+        self.state_embedder = torch.nn.Linear(15, 10)
+
 
         # DQN layers
-        self.qvalue_stream = torch.nn.Linear(27, 10)
-        self.qvalue = torch.nn.Linear(10, 1)
+        self.qvalue_stream = torch.nn.Linear(10, 5)
+        self.qvalue = torch.nn.Linear(5, 1)
         
 
     def forward(self, x, edge_index, edge_attr, batch , action_mask, goal, visited_subgraph, subgraph_node_indices_batch):  
 
+ 
 
         if action_mask is not None:
             action_mask = action_mask.to(x.get_device())
@@ -57,40 +91,80 @@ class GraphQNetwork(torch.nn.Module):
             
             batch = torch.zeros(x.shape[0], dtype=torch.long)
         
-
+        
 
         batch = batch.to(x.get_device())
-        x = torch.dropout(x, p=0.5, train=self.training)
+
+
         # Process with GAT layers
-        x = self.norm1(x, batch)
+        x = self.norm0(x, batch)
+
+        # Initial input features
         identity = x
-        x = F.elu(self.norm1(self.conv1(x, edge_index, edge_attr))) + identity
+
+        # First GAT layer with skip connection
+        x = F.relu(self.conv1(x, edge_index, edge_attr))
+        # Subsequent GAT layers with skip connections
+        x = torch.cat([x, identity], dim=1)  # Skip connection
 
         identity = x
-        x = F.elu(self.norm2(self.conv2(x, edge_index, edge_attr))) + identity
+        x = F.relu(self.conv2(x, edge_index, edge_attr))
+        x = torch.cat([x, identity], dim=1)
 
         identity = x
-        x = F.elu(self.norm3(self.conv3(x, edge_index, edge_attr)))+ identity
 
-
-        x = self.graph_embedder(x)
-
-        graph_embedding = global_mean_pool(x, batch)
+        x = F.relu(self.conv3(x, edge_index, edge_attr))
         
+        x = torch.cat([x, identity], dim=1)
+
+
+        identity = x
+
+        x = F.relu(self.conv4(x, edge_index, edge_attr))
+
+
+        x = torch.cat([x, identity], dim=1)
+        dynamic_weight = self.dynamic_weight_module4(goal[batch])
+        x = x * dynamic_weight
+        
+ 
+        identity = x
+
+        x = self.conv5(x, edge_index, edge_attr)
+
+        x = torch.cat([x, identity], dim=1)
+
+ 
+        graph_embedding_mean = global_mean_pool(x, batch)
+        graph_embedding_add = global_add_pool(x, batch)
+        graph_embedding = graph_embedding_mean + graph_embedding_add
+
+        graph_embedding = self.graph_embedder(graph_embedding)
         
         # Extract subgraph embeddings using the adjusted indices
         subgraph_embeddings = x[visited_subgraph]
 
         # Compute the global mean for each subgraph
-        subgraph_means = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        subgraph_embedding_mean = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        subgraph_embedding_add = global_add_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        subgraph_embedding = subgraph_embedding_mean + subgraph_embedding_add
+        subgraph_embedding = torch.cat([subgraph_embedding], dim=-1)
+        subgraph_embedding = self.subgraph_embedder(subgraph_embedding)
 
-        graph_level_embedding = torch.cat([graph_embedding, subgraph_means, goal], dim=-1)
 
         #concat the graph level embedding with each node of the corresponding graph with batch
-        conc_features = torch.cat([x, graph_level_embedding[batch]], dim=-1)
 
-        qvals = self.qvalue_stream(conc_features)
-        qvals = self.qvalue(qvals)
+        node_embedding = self.node_embedder(x)
+        conc_state = torch.cat([node_embedding, graph_embedding[batch], subgraph_embedding[batch]], dim=-1)
+
+
+        state_embedding = self.state_embedder(conc_state)
+
+        qvals_stream = F.relu(self.qvalue_stream(state_embedding))
+        qvals_goal = torch.cat([qvals_stream, goal[batch]], dim=-1)
+
+        goal_advantage = self.goal_advantage(qvals_goal)
+        qvals = self.qvalue(qvals_stream) + goal_advantage
 
 
         # Apply action mask if provided
@@ -116,7 +190,7 @@ class GraphQNetwork(torch.nn.Module):
 # -------------------------
 class Agent:
     def __init__(self, state_size, edge_attr_size, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_VARIABLE_ACTION_SPACE')  # Choose an appropriate experiment name
+        self.writer = SummaryWriter('runs/DQL_GRAPH_VARIABLE_ACTION_SPACE_GOAL')  # Choose an appropriate experiment name
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
@@ -190,6 +264,27 @@ class Agent:
             if len(self.buffer) > self.batch_size:
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
+
+
+    def get_qvalues(self, state, action_mask, goal, visited_subgraph):
+        state = state
+        action_mask = action_mask.to(self.device)
+        goal = goal.to(self.device)
+        goal = goal.unsqueeze(0)
+
+        self.qnetwork_local.eval()
+        x = state.x.to(self.device)
+        edge_index = state.edge_index.to(self.device)
+        edge_attr = state.edge_attr.to(self.device)
+        self.qnetwork_local.eval()
+
+
+        with torch.no_grad():
+            action_values = self.qnetwork_local(x, edge_index, edge_attr, None, action_mask, goal, visited_subgraph, None)
+
+        return_values = action_values.cpu()
+        self.qnetwork_local.train()
+        return return_values
 
     def act(self, state, action_mask, goal, visited_subgraph, eps=0, ):
         state = state
@@ -321,7 +416,6 @@ class Agent:
             Q_targets_next = Q_targets_next.gather(0, q_indices).detach().squeeze()
 
             Q_targets = b_reward + (gamma * Q_targets_next * (1 - b_done))
-
             Q_expected_result = self.qnetwork_local(b_x_s, b_edge_index_s, b_edge_attr_s, x_s_batch, None, goal = b_goal, visited_subgraph=b_visited_subgraph, subgraph_node_indices_batch=b_visited_subgraph_batch).squeeze()
 
 
@@ -331,7 +425,6 @@ class Agent:
             
             # Compute loss
 
-            print(f"Q_expected : {Q_expected} vs Q_targets : {Q_targets}")
             td_error = torch.abs(Q_expected - Q_targets)
             loss = torch.mean(td_error.pow(2))
             self.log_loss(loss.item())

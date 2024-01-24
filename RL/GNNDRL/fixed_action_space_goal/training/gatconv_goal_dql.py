@@ -9,18 +9,19 @@ class GATConcDQL(torch.nn.Module):
         self.embedding_size = 5
         self.heads = 1
 
+        self.norm = GraphNorm(num_node_features)
         # Define GATConv layers
-        self.conv1 = GATv2Conv(num_node_features, self.embedding_size, heads=self.heads, edge_dim=num_edge_features, add_self_loops=True, dropout=0.5)
+        self.conv1 = GATv2Conv(num_node_features, self.embedding_size, heads=self.heads, edge_dim=num_edge_features, add_self_loops=True)
         #self.norm1 = GraphNorm(self.embedding_size * self.heads)
-        self.conv2 = GATv2Conv(self.embedding_size *self.heads , self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True, dropout=0.5)
+        self.conv2 = GATv2Conv(13 , self.embedding_size, edge_dim=num_edge_features, heads=self.heads, add_self_loops=True)
         #self.norm2 = GraphNorm(self.embedding_size * self.heads)
 
 
         # Dueling DQN layers
-        self.value_stream = torch.nn.Linear(self.embedding_size *self.heads + self.embedding_size  + goal_size, 10)
+        self.value_stream = torch.nn.Linear(42, 10)
         self.value = torch.nn.Linear(10, 1)
 
-        self.advantage_stream = torch.nn.Linear(self.embedding_size *self.heads + self.embedding_size + goal_size,10)
+        self.advantage_stream = torch.nn.Linear(42,10)
         self.advantage = torch.nn.Linear(10, num_actions)
 
     def forward(self, x, edge_index, edge_attr, batch , current_node_ids, action_mask=None, one_hot_goal=None):  
@@ -39,16 +40,19 @@ class GATConcDQL(torch.nn.Module):
 
         batch = batch.to(x.get_device())
 
-        
+        x = self.norm(x, batch)
 
         # Process with GAT layers
-
+        identity = x
         x = self.conv1(x, edge_index, edge_attr)
         x = F.relu(x)
+        x = torch.cat((x, identity), dim=1)
 
+        identity = x
         #apply conv 2 with return attention weights
         x = self.conv2(x, edge_index, edge_attr)
         x = F.relu(x)
+        x = torch.cat((x, identity), dim=1)
         
 
  
@@ -64,13 +68,11 @@ class GATConcDQL(torch.nn.Module):
         
         # Compute node-level advantage
         advantage = F.relu(self.advantage_stream(x))
-        advantage = F.dropout(advantage, p=0.5, training=self.training)
 
         advantage = self.advantage(advantage)
         #advantage should be of shape [num_graphs, num_actions]
 
         value = F.relu(self.value_stream(x))
-        value = F.dropout(value, p=0.5, training=self.training)
         value = self.value(value)
         #value should be of shape [num_graphs, 1]
 

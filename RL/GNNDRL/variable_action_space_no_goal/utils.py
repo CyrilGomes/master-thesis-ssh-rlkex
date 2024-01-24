@@ -89,10 +89,6 @@ class MyGraphData(Data):
             return self.x_s.size(0)
         if key == 'edge_index_t':
             return self.x_t.size(0)
-        if key == 'visited_subgraph':
-            return self.x_t.size(0)
-        if key == 'action':
-            return self.x_s.size(0)
         return super().__inc__(key, value, *args, **kwargs)
     
     def __cat_dim__(self, key, value, *args, **kwargs):
@@ -105,8 +101,6 @@ class MyGraphData(Data):
         if key == 'exp_idx':
             return None
         if key == 'is_weight':
-            return None
-        if key == 'goal':
             return None
 
         

@@ -342,9 +342,10 @@ class GraphTraversalEnv(gym.Env):
             valid_actions = best_actions
 
 
-        action_mask = torch.full((len(self.node_mapping),), 0)
-        action_mask[valid_actions] = 1
 
+
+        action_mask = np.full(len(self.node_mapping), 0)  # Assuming `self.node_mapping` maps all nodes
+        action_mask[valid_actions] = 1
 
         return action_mask
     

@@ -161,9 +161,9 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 10
-        self.STEP_PENALTY = -0.01
-        self.PROXIMITY_MULTIPLIER = 1
+        self.TARGET_FOUND_REWARD = 1
+        self.STEP_PENALTY = 0
+        self.PROXIMITY_MULTIPLIER = 0
         self.INCORRECT_LEAF_PENALTY = 0
 
 
@@ -377,48 +377,32 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError(f"Current node {self.current_node} has no neighbors")
 
 
-        prev_distance_to_goal = self._get_distance_to_goal(goal)
 
         self._perform_action(action)
         
-
-        new_distance_to_goal = self._get_distance_to_goal(goal)
-
         #check if goal is reachable
-        has_path = new_distance_to_goal is not None
-        is_incorect_leaf = self.graph.out_degree(self.current_node) == 0 and not has_path
+        is_incorect_leaf = self.graph.out_degree(self.current_node) == 0
 
 
         has_found_target = self.current_node == self.target_node 
 
-        reward = compute_reward(has_found_target, self.TARGET_FOUND_REWARD, self.STEP_PENALTY, self.INCORRECT_LEAF_PENALTY, is_incorect_leaf)
-        
-        if has_path and not has_found_target:
-
-            if new_distance_to_goal < prev_distance_to_goal:
-                #give a reward for getting closer to the target
-                distance_reward = self.PROXIMITY_MULTIPLIER
-            elif new_distance_to_goal > prev_distance_to_goal:
-                print("Not possible")
-            reward += distance_reward
-
-
         self.nb_actions_taken += 1
-
+        new_goal = None
         if has_found_target:
 
             #print(f"Found target {self.target_node}! reward : {reward}")
             obs = self._get_obs()
 
-            reward = self.TARGET_FOUND_REWARD
-            return obs, reward, True, self._episode_info(found_target=True)
+            reward = 1
+            return obs, reward, True, self._episode_info(found_target=True), new_goal
+        reward = 0
 
-
-
+        if self.current_node in self.target_nodes:
+            reward = 1
+            new_goal = self.target_nodes[self.current_node]
         obs = self._get_obs()
-        done = is_incorect_leaf
 
-        return obs, reward, done, self._episode_info(incorrect_leaf=is_incorect_leaf, no_path=not has_path)
+        return obs, reward, is_incorect_leaf, self._episode_info(incorrect_leaf=is_incorect_leaf), new_goal
 
 
 
@@ -456,7 +440,6 @@ class GraphTraversalEnv(gym.Env):
             'nb_actions_taken': self.nb_actions_taken,
             'nb_nodes_visited': self.calculate_number_visited_nodes(),
             'stopped_for_incorrect_leaf': incorrect_leaf,
-            'stopped_for_no_path': no_path,
         }
 
 
@@ -587,6 +570,8 @@ class GraphTraversalEnv(gym.Env):
             #ToUndirected(),         # Convert to undirected graph
         ])
 
+        #reverse edges
+        edge_index = edge_index.flip(dims=[0])
 
         #reverse the direction of the edges
         #edge_index = edge_index[[1,0],:]

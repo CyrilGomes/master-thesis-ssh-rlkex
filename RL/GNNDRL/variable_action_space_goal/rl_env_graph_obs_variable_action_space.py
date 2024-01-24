@@ -311,6 +311,7 @@ class GraphTraversalEnv(gym.Env):
             int[]: The best actions to take.
         """
 
+
         neighbors = list(self.graph.successors(self.current_node))
         has_path_neighbors = []
         for neighbor in neighbors:
@@ -348,18 +349,23 @@ class GraphTraversalEnv(gym.Env):
 
         return action_mask
     
-    def get_goal_one_hot(self):
+    def get_goal_one_hot(self, goal):
         one_hot_targets = torch.zeros(6, dtype=torch.float)
-        #target nodes is a map of node -> value
-        #The value is effectively the goal from 0 to 6
-        #return the one hot encoded target from the value in the map
-        target_node_to_goal = self.target_nodes_map[self.target_node]
-        one_hot_targets[target_node_to_goal] = 1
+
+        one_hot_targets[goal] = 1
         return one_hot_targets
+
+
+    def set_target_goal(self, goal):
+        #goal is the value from 0 to 6, get the key from the map that has this value
+        goal_node = [key for key, value in self.target_nodes_map.items() if value == goal][0]
+        self.target_node = goal_node
 
 
     def step(self, action):
         
+
+
         #check if has neighbors
         if self.graph.out_degree(self.current_node) == 0:
             raise ValueError(f"Current node {self.current_node} has no neighbors")
@@ -373,40 +379,30 @@ class GraphTraversalEnv(gym.Env):
 
     
         #check if at least one target is reachable
-        has_path = self._get_dist_to_target() is not None
 
 
-        has_found_target = self.current_node == self.target_node and self.current_node not in self.visited_keys
-        reward = compute_reward( has_found_target, 
-                                self.TARGET_FOUND_REWARD, self.STEP_PENALTY, 
-                                self.NO_PATH_PENALTY, len(self.visited_keys), has_path)
-        
-    
+        has_found_target = self.current_node == self.target_node
+        reward = 0
 
 
         self.nb_actions_taken += 1
 
         is_incorect_leaf = False
+        new_goal = None
         if has_found_target:
             
-            #print(f"Found target {self.target_node}! reward : {reward}")
-            self.visited_keys.add(self.current_node)
             obs = self._get_obs()
-
-            if len(self.visited_keys) == self.nb_targets:
-                reward = self.ADDITIONAL_TARGET_MULTIPLIER * self.TARGET_FOUND_REWARD * len(self.visited_keys)
-                return obs, reward, True, self._episode_info(found_target=True)
-            self.current_target_iterator += 1
-            self.target_node = self.target_nodes[self.current_target_iterator]
-            self._restart_agent_from_root()
-            return obs, reward, False, self._episode_info()
+            reward = 1
+            return obs, reward, True, self._episode_info(found_target=True), new_goal
         elif self.graph.out_degree(self.current_node) == 0:
+
+
             is_incorect_leaf = True
 
         obs = self._get_obs()
-        done = is_incorect_leaf
 
-        return obs, reward, done, self._episode_info()
+        return obs, reward, is_incorect_leaf, self._episode_info(), new_goal
+        
 
 
 
@@ -449,8 +445,7 @@ class GraphTraversalEnv(gym.Env):
         nb_keys_found = len(self.visited_keys)
         return {
             'found_target': found_target,
-            'nb_keys_found': nb_keys_found,
-
+            'curent_node': self.current_node,
         }
 
     def _increment_visited(self, node):
@@ -586,10 +581,11 @@ class GraphTraversalEnv(gym.Env):
         
         transform = T.Compose([T.ToUndirected()])
 
-        
+        #reverse edges
+        edge_index = edge_index.flip(dims=[0])
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
-        data = transform(data)
+        #data = transform(data)
         return data
 
     def close(self):

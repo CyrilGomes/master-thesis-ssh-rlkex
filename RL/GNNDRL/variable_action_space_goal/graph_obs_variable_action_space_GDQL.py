@@ -40,7 +40,7 @@ import heapq  # For priority queue
 import time
 from agent_variable_action_space import Agent
 from utils import preprocess_graph, convert_types, add_global_root_node, connect_components, remove_all_isolated_nodes
-
+from networkx.drawing.nx_pydot import graphviz_layout
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 import matplotlib.pyplot as plt
@@ -51,12 +51,12 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e6)  # replay buffer size
-BATCH_SIZE = 300         # batch size
+BUFFER_SIZE = int(3e5)  # replay buffer size
+BATCH_SIZE = 250         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.05              # soft update of target parameters
 LR = 0.01               # learning rate
-UPDATE_EVERY = 150        # how often to update the network
+UPDATE_EVERY = 100        # how often to update the network
 
 FOLDER = "Generated_Graphs/output/"
 STATE_SPACE = 7
@@ -76,6 +76,59 @@ def check_parameters(env):
 
 
 
+def show_graph(graph, goal, current_node, neighbours_qvalues):
+    #for all target nodes, if the value of target_nodes[node] is 0 then label is 'A', if 1 then label is 'B', etc.. up to 5 (F)
+    labels = {}
+    for node, attributes in graph.nodes(data=True):
+        if attributes['cat'] >= 0:
+            labels[str(node)] = chr(ord('A') + attributes['cat'])
+            #if is goal concatenate with "G"
+            if node == goal:
+                labels[str(node)] = labels[str(node)] + " G"
+
+        elif node == current_node:
+            labels[str(node)] = "X"
+        else:
+            labels[str(node)] = ""
+        #if node is a neighbou concatenate the qvalue
+        if node in neighbours_qvalues:
+            labels[str(node)] = f"{labels[str(node)]} : {neighbours_qvalues[node].item():.2f}"
+    #set colors of target nodes to red
+            
+    #set colors of neighbours as a heatmap of the qvalues, closer to 1 is red, closer to 0 is blue
+    colors = []
+    for node, attributes in graph.nodes(data=True):
+        if attributes['cat'] >= 0:
+            colors.append((1, 0, 0))
+        elif node == current_node:
+            colors.append((0, 1, 0))
+        elif node in neighbours_qvalues:
+            
+            min_qvalue = min(neighbours_qvalues.values()).item()
+            max_qvalue = max(neighbours_qvalues.values()).item()
+
+
+            qvalue = neighbours_qvalues[node] 
+
+            #convert qvalue to regular float
+            qvalue = qvalue.item()
+            
+
+            #normalize between 0 and 1 in case
+            qvalue = 0 if max_qvalue == min_qvalue else (qvalue - min_qvalue) / (max_qvalue - min_qvalue)
+            
+            colors.append((qvalue, 0, 1 - qvalue))
+        else:
+            colors.append((0, 0, 0))
+    
+    G_temp = nx.DiGraph()
+    G_temp.add_nodes_from(str(n) for n in graph.nodes())    
+    G_temp.add_edges_from((str(u), str(v)) for u, v in graph.edges())
+    #draw the graph with labels and colors
+    pos = graphviz_layout(G_temp, prog='dot')
+    nx.draw(G_temp, labels=labels, node_color=colors, pos = pos)
+    plt.show()
+
 def test_for_graph(file):
     """Basically the same as the training function, but without training"""
     graph = nx.read_graphml(file)
@@ -89,23 +142,37 @@ def test_for_graph(file):
     check_parameters(env)
 
     
-    observation = env.reset()
-    done = False
     total_reward = 0
     total_key_found = 0
 
-    while not done:
-        goal = env.get_goal_one_hot()
-        action_mask = env._get_action_mask()
-        visited_subgraph = env.get_visited_subgraph()
-        action = agent.act(observation, action_mask, goal, visited_subgraph)
-        new_observation, reward, done, info = env.step(action)
-        total_reward += reward
-        if done:
-            total_key_found = info["nb_keys_found"]
-            break
-        
-        observation = new_observation
+    for target in target_nodes:
+        done = False
+
+        goal = target_nodes[target]
+        observation = env.reset()
+        goal_one_hot = env.get_goal_one_hot(goal)
+        env.set_target_goal(goal)
+        display_graph = env.graph
+        while not done:
+            
+            action_mask = env._get_action_mask()
+            visited_subgraph = env.get_visited_subgraph()
+            action = agent.act(observation, action_mask, goal_one_hot, visited_subgraph)
+            qvalues = agent.get_qvalues(observation, action_mask, goal_one_hot, visited_subgraph)
+            node_qvalues_map = {}
+            for i, qvalue in enumerate(qvalues):
+                if action_mask[i] == 1:
+                    node_qvalues_map[env.inverse_node_mapping[i]] = qvalue
+            if SHOW_GAPH_TEST:
+                show_graph(display_graph, target, env.current_node, node_qvalues_map)
+            
+            new_observation, reward, done, info, new_goal = env.step(action)
+            total_reward += reward
+            if done:
+                if info["found_target"]:
+                    total_key_found += 1
+            
+            observation = new_observation
     
     return total_reward, total_key_found, len(target_nodes)
 
@@ -114,9 +181,10 @@ def test_for_graph(file):
 
 
 
-INIT_EPS = 0.98
-EPS_DECAY = 0.9999
+INIT_EPS = 0.99
+EPS_DECAY = 0.999998
 MIN_EPS = 0.05
+
 
 def define_targets(graph):
     target_nodes_map = {}
@@ -141,10 +209,11 @@ def supervised_training(file):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 1000
+    num_episodes = 300
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_key_found = 0
 
+    
 
     
     for episode in range_episode:
@@ -152,34 +221,38 @@ def supervised_training(file):
 
  
         done = False
-
+        #get a random index goal from the target map
+        goal = random.choice(list(target_nodes.keys()))
+        goal = target_nodes[goal]
+        goal_one_hot = env.get_goal_one_hot(goal)
+        env.set_target_goal(goal)
+        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph"])
+        experiences = []
         while not done:
-            goal = env.get_goal_one_hot()
+
             action_mask = env._get_action_mask()
             visited_subgraph = env.get_visited_subgraph()
-            action = random.choice(env._get_best_action())
-            new_observation, reward, done, info = env.step(action)
+
+            best_actions = env._get_best_action()
+            if len(best_actions) == 0:
+                print("No best action")
+            action = random.choice(best_actions)
+            new_observation, reward, done, info, new_goal = env.step(action)
+
             next_action_mask = env._get_action_mask()
             next_visited_subgraph = env.get_visited_subgraph()
 
-
-            agent.step(observation, action, reward, new_observation, done, next_action_mask, goal, visited_subgraph, next_visited_subgraph)
+            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph))
 
             
             if done:
-                max_key_found = max(max_key_found, info["nb_keys_found"])
-                if info["found_target"]:
-                    #print("Success !")
-                    windowed_success += 1
                 break
             
             observation = new_observation
+        for exp in experiences:
+            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph)
 
-        metrics = {
-            'Loss': agent.losses[-1] if len(agent.losses) > 0 else 0.0,
-            'MaxKeyFound' : max_key_found,
-        }
-        agent.log_metrics(metrics)
+
 
 
         
@@ -205,7 +278,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 1600
+    num_episodes = 300
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -217,13 +290,12 @@ def execute_for_graph(file, training = True):
     keys_per_episode = []
 
     nb_moves_per_episode = []
-    
+    nb_keys_found = np.full(6,0)
+
     for episode in range_episode:
         observation = env.reset()
         episode_reward = 0
-        episode_stats = {"nb_of_moves": 0,
-                         "nb_key_found": 0,
-                         'nb_possible_keys' : 0}
+        episode_stats = {"nb_of_moves": 0}
         global EPS 
         if training:
             EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
@@ -233,12 +305,20 @@ def execute_for_graph(file, training = True):
         curr_episode_rewards = []
         done = False
 
+        goal = random.choice(list(target_nodes.keys()))
+        goal = target_nodes[goal]
+        goal_one_hot = env.get_goal_one_hot(goal)
+        env.set_target_goal(goal)
+        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph"])
+        experiences = []
         while not done:
-            goal = env.get_goal_one_hot()
+
             action_mask = env._get_action_mask()
             visited_subgraph = env.get_visited_subgraph()
-            action = agent.act(observation, action_mask, goal,visited_subgraph, curr_eps)
-            new_observation, reward, done, info = env.step(action)
+            action = agent.act(observation, action_mask, goal_one_hot,visited_subgraph, curr_eps)
+            new_observation, reward, done, info, new_goal = env.step(action)
+            if new_goal is not None:
+                goal_one_hot = env.get_goal_one_hot(new_goal)
             next_action_mask = env._get_action_mask()
             next_visited_subgraph = env.get_visited_subgraph()
             curr_episode_rewards.append(reward)
@@ -249,24 +329,25 @@ def execute_for_graph(file, training = True):
 
             }
             agent.log_metrics(metrics)
-            if training:
+            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph))
 
-                agent.step(observation, action, reward, new_observation, done, next_action_mask, goal, visited_subgraph, next_visited_subgraph)
 
             episode_stats["nb_of_moves"] += 1
 
             
             if done:
-                episode_stats["nb_key_found"] = info["nb_keys_found"]
-                max_key_found = max(max_key_found, info["nb_keys_found"])
                 if info["found_target"]:
-                    stats["nb_success"] += 1
+                    if new_goal is None:
+                        nb_keys_found[goal] = nb_keys_found[goal] + 1
+                        stats["nb_success"] += 1
                     #print("Success !")
                     windowed_success += 1
                 break
             
             observation = new_observation
-        keys_per_episode.append(episode_stats["nb_key_found"])
+        
+        for exp in experiences:
+            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph)
         episode_reward = np.sum(curr_episode_rewards)
         nb_moves_per_episode.append(episode_stats["nb_of_moves"])
 
@@ -275,21 +356,26 @@ def execute_for_graph(file, training = True):
 
         avg_reward = np.mean(episode_rewards[-10:]) if len(episode_rewards) > 0 else 0.0
 
-        key_found_ratio = episode_stats["nb_key_found"] / len(target_nodes)
+        #keep only nb_keys_found for the targets that are in the graph
+        total_key_found = np.sum(nb_keys_found)
+        nb_keys_found_ratio = nb_keys_found if total_key_found == 0 else np.divide(nb_keys_found, total_key_found)
 
         metrics = {
 
-            'MaxKeyFound' : max_key_found,
-            'KeyFoundRatio' : key_found_ratio,
             'NbMoves' : episode_stats["nb_of_moves"],
 
         }
         agent.log_metrics(metrics)
+        
 
-
-        avg_key_found = np.mean(keys_per_episode[-10:]) if len(keys_per_episode) > 0 else 0.0
         avg_nb_moves = np.mean(nb_moves_per_episode[-10:]) if len(nb_moves_per_episode) > 0 else 0.0
-        range_episode.set_description(f"MER : {max_reward:.2f} MaxKeyFnd : {max_key_found:.2f} NbMvs : {avg_nb_moves:.2f} AvgKeyFound : {avg_key_found:.2f} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}")
+
+        description = f"MER : {max_reward:.2f} NbMvs : {avg_nb_moves:.2f} Avg Reward : {avg_reward:.2f} SR : {(stats['nb_success'] / (episode + 1)):.2f} eps : {curr_eps:.2f}"
+        #add to the decription the number of keys found
+        for i, nb_keys in enumerate(nb_keys_found_ratio):
+            description += f" NbKeys{i} : {nb_keys:.2f}"
+
+        range_episode.set_description(description)
         range_episode.refresh() # to show immediately the update
         episode_rewards.append(episode_reward)
 
@@ -312,7 +398,7 @@ def visualize(rewards):
 
 
 
-
+SHOW_GAPH_TEST = False
 EPS = INIT_EPS
 
 #get all files in the folder recursively
@@ -328,12 +414,12 @@ for root, dirs, files in os.walk(FOLDER):
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 40
+nb_file_overall = 150
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)
-nb_supervised_files = int(nb_files * 0.2)
-nb_training_files = int(nb_files *0.6)
+nb_supervised_files = int(nb_files * 0.05)
+nb_training_files = int(nb_files *0.75)
 nb_testing_files = int(nb_files * 0.2)
 
 
@@ -356,7 +442,12 @@ for i, file in enumerate(supervised_training_files):
 
 print(f"Executing Training ...")
 
+changed_lr = False
 for i, file in enumerate(training_files):
+    if i > nb_training_files * 0.3 and not changed_lr:
+        SHOW_GAPH_TEST = True
+        changed_lr = True
+
     if file.endswith(".graphml"):
         print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
         execute_for_graph(file, True)
@@ -366,6 +457,7 @@ for i, file in enumerate(training_files):
             print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
 
 print(f"Training done ")
+SHOW_GAPH_TEST = False
 
 print(f"Executing Testing ...")
 test_rewards = []
