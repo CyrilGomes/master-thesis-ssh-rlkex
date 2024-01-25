@@ -7,6 +7,7 @@
 # -------------------------
 
 from collections import namedtuple
+import datetime
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, GraphNorm, dense_diff_pool, DenseSAGEConv, TopKPooling
@@ -44,6 +45,7 @@ class GraphQNetwork(torch.nn.Module):
 
         # Define GAT layers
         self.norm0 = GraphNorm(num_node_features)
+        self.norm_edge = GraphNorm(num_edge_features)
         dynamic_weight_module0 = DynamicWeightModule(6, num_node_features)
 
         self.conv1 = GATv2Conv(num_node_features , 10, edge_dim=num_edge_features, heads=2)
@@ -54,30 +56,26 @@ class GraphQNetwork(torch.nn.Module):
         self.conv3 = GATv2Conv(67, 30, edge_dim=num_edge_features)
         self.dynamic_weight_module3 = DynamicWeightModule(6, 97)
 
-        self.conv4 = GATv2Conv(97, 20, edge_dim=num_edge_features)
-        self.dynamic_weight_module4 = DynamicWeightModule(6, 117)
-
-        self.conv5 = GATv2Conv(117, 10, edge_dim=num_edge_features)
-        self.dynamic_weight_module5 = DynamicWeightModule(6, 127)
-
 
         self.dynamic_weight_module = DynamicWeightModule(6, num_node_features)
 
-        self.node_embedder = torch.nn.Linear(127, 5)
 
-        self.edge_embedder = torch.nn.Linear(1, 1)
-        self.graph_embedder = torch.nn.Linear(127, 5)
-        self.subgraph_embedder = torch.nn.Linear(127, 5)
+        
 
-        self.goal_advantage = torch.nn.Linear(11, 1)
+        self.node_embedder_stream = torch.nn.Linear(97, 30)
+        self.node_embedder_stream_2 = torch.nn.Linear(30, 15)
 
+        self.node_embedder = torch.nn.Linear(21, 6)
 
-        self.state_embedder = torch.nn.Linear(15, 10)
+        self.graph_embedder = torch.nn.Linear(8, 6)
+        self.subgraph_embedder = torch.nn.Linear(8, 6)
+
+        self.state_embedder = torch.nn.Linear(20, 10)
 
 
         # DQN layers
-        self.qvalue_stream = torch.nn.Linear(10, 5)
-        self.qvalue = torch.nn.Linear(5, 1)
+        self.qvalue_stream = torch.nn.Linear(10, 6)
+        self.qvalue = torch.nn.Linear(12, 1)
         
 
     def forward(self, x, edge_index, edge_attr, batch , action_mask, goal, visited_subgraph, subgraph_node_indices_batch):  
@@ -98,6 +96,7 @@ class GraphQNetwork(torch.nn.Module):
 
         # Process with GAT layers
         x = self.norm0(x, batch)
+        edge_attr = self.norm_edge(edge_attr, batch[edge_index[0]])
 
         # Initial input features
         identity = x
@@ -117,22 +116,16 @@ class GraphQNetwork(torch.nn.Module):
         
         x = torch.cat([x, identity], dim=1)
 
+        x = F.relu(self.node_embedder_stream(x))
+        x = F.relu(self.node_embedder_stream_2(x))
 
-        identity = x
+        x = torch.cat([x, goal[batch]], dim=-1)
+        x = self.node_embedder(x)
+        #embed the mean of the attributes of the outgoing edges of each node
+        edge_attr_in_mean = scatter_mean(edge_attr, edge_index[0], dim=0, dim_size=x.shape[0])
+        edge_attr_out_mean = scatter_mean(edge_attr, edge_index[1], dim=0, dim_size=x.shape[0])
 
-        x = F.relu(self.conv4(x, edge_index, edge_attr))
-
-
-        x = torch.cat([x, identity], dim=1)
-        dynamic_weight = self.dynamic_weight_module4(goal[batch])
-        x = x * dynamic_weight
-        
- 
-        identity = x
-
-        x = self.conv5(x, edge_index, edge_attr)
-
-        x = torch.cat([x, identity], dim=1)
+        x = torch.cat([x, edge_attr_in_mean,edge_attr_out_mean ], dim=-1)
 
  
         graph_embedding_mean = global_mean_pool(x, batch)
@@ -154,8 +147,7 @@ class GraphQNetwork(torch.nn.Module):
 
         #concat the graph level embedding with each node of the corresponding graph with batch
 
-        node_embedding = self.node_embedder(x)
-        conc_state = torch.cat([node_embedding, graph_embedding[batch], subgraph_embedding[batch]], dim=-1)
+        conc_state = torch.cat([x, graph_embedding[batch], subgraph_embedding[batch]], dim=-1)
 
 
         state_embedding = self.state_embedder(conc_state)
@@ -163,8 +155,7 @@ class GraphQNetwork(torch.nn.Module):
         qvals_stream = F.relu(self.qvalue_stream(state_embedding))
         qvals_goal = torch.cat([qvals_stream, goal[batch]], dim=-1)
 
-        goal_advantage = self.goal_advantage(qvals_goal)
-        qvals = self.qvalue(qvals_stream) + goal_advantage
+        qvals = self.qvalue(qvals_goal)
 
 
         # Apply action mask if provided
@@ -190,7 +181,8 @@ class GraphQNetwork(torch.nn.Module):
 # -------------------------
 class Agent:
     def __init__(self, state_size, edge_attr_size, seed, device, lr, buffer_size, batch_size, gamma, tau, update_every):
-        self.writer = SummaryWriter('runs/DQL_GRAPH_VARIABLE_ACTION_SPACE_GOAL')  # Choose an appropriate experiment name
+        date = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
         self.state_size = state_size
         self.seed = random.seed(seed)
         self.edge_attr_size = edge_attr_size
@@ -207,6 +199,10 @@ class Agent:
         self.qnetwork_local = GraphQNetwork(state_size, self.edge_attr_size, seed).to(device)
         self.qnetwork_target = GraphQNetwork(state_size, self.edge_attr_size,seed).to(device)
 
+        class_name = self.qnetwork_local.__class__.__name__
+        name = f"VACTION_SPACE_GOAL_{class_name}_{date}"
+        name = f"runs/{name}"
+        self.writer = SummaryWriter(name)  # Choose an appropriate experiment name
         #init the weights of the target network to be the same as the local network
         self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
 

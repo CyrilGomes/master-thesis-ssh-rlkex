@@ -278,7 +278,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 300
+    num_episodes = 1000
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -414,7 +414,7 @@ for root, dirs, files in os.walk(FOLDER):
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 150
+nb_file_overall = 180
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)
@@ -444,7 +444,7 @@ print(f"Executing Training ...")
 
 changed_lr = False
 for i, file in enumerate(training_files):
-    if i > nb_training_files * 0.3 and not changed_lr:
+    if i > nb_training_files * 0.8 and not changed_lr:
         SHOW_GAPH_TEST = True
         changed_lr = True
 

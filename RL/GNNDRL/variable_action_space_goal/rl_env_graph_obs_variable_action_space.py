@@ -396,6 +396,11 @@ class GraphTraversalEnv(gym.Env):
             return obs, reward, True, self._episode_info(found_target=True), new_goal
         elif self.graph.out_degree(self.current_node) == 0:
 
+            prob_of_new_target = 0.5
+            if self.current_node in self.target_nodes:
+                if np.random.rand() < prob_of_new_target:
+                    new_goal = self.target_nodes_map[self.current_node]
+                    reward = 1
 
             is_incorect_leaf = True
 
