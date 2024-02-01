@@ -11,11 +11,9 @@ import torch_geometric.transforms as T
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 import concurrent.futures
-from numba import jit
 from torch_geometric.utils import to_undirected
 from root_heuristic_rf import GraphPredictor
 
-@jit(nopython=True)
 def compute_reward(has_found_target, 
                    TARGET_FOUND_REWARD, STEP_PENALTY, 
                     NO_PATH_PENALTY, visited_keys_count, has_path):
@@ -31,7 +29,7 @@ def compute_reward(has_found_target,
     #print(f"Distance reward: {distance_reward}, Step penalty: {STEP_PENALTY}, Revisit penalty: {revisit_penalty}, New node bonus: {new_node_bonus}")
     return total_reward
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes, root_detection_model_path="models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
+    def __init__(self, graph, target_nodes, root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
         """
         Initializes the Graph Traversal Environment.
 
@@ -396,11 +394,11 @@ class GraphTraversalEnv(gym.Env):
             return obs, reward, True, self._episode_info(found_target=True), new_goal
         elif self.graph.out_degree(self.current_node) == 0:
 
-            prob_of_new_target = 0.5
-            if self.current_node in self.target_nodes:
-                if np.random.rand() < prob_of_new_target:
-                    new_goal = self.target_nodes_map[self.current_node]
-                    reward = 1
+            #prob_of_new_target = 0.5
+            #if self.current_node in self.target_nodes:
+                #if np.random.rand() < prob_of_new_target:
+                #    new_goal = self.target_nodes_map[self.current_node]
+                #    reward = 1
 
             is_incorect_leaf = True
 
@@ -587,7 +585,7 @@ class GraphTraversalEnv(gym.Env):
         transform = T.Compose([T.ToUndirected()])
 
         #reverse edges
-        edge_index = edge_index.flip(dims=[0])
+        #edge_index = edge_index.flip(dims=[0])
 
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         #data = transform(data)

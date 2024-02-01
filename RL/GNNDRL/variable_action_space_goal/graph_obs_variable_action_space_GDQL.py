@@ -8,8 +8,6 @@ import numpy as np
 import networkx as nx
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import keyboard
 import torch_geometric
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
@@ -43,7 +41,6 @@ from utils import preprocess_graph, convert_types, add_global_root_node, connect
 from networkx.drawing.nx_pydot import graphviz_layout
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-import matplotlib.pyplot as plt
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -51,14 +48,14 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(3e5)  # replay buffer size
-BATCH_SIZE = 600         # batch size
+BUFFER_SIZE = int(1e6)  # replay buffer size
+BATCH_SIZE = 1000         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 0.05              # soft update of target parameters
-LR = 0.01               # learning rate
-UPDATE_EVERY = 50        # how often to update the network
+LR = 0.001               # learning rate
+UPDATE_EVERY = 200        # how often to update the network
 
-FOLDER = "Generated_Graphs/output/"
+FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
@@ -75,7 +72,7 @@ def check_parameters(env):
 
 
 
-
+"""
 def show_graph(graph, goal, current_node, neighbours_qvalues):
     #for all target nodes, if the value of target_nodes[node] is 0 then label is 'A', if 1 then label is 'B', etc.. up to 5 (F)
     labels = {}
@@ -128,7 +125,7 @@ def show_graph(graph, goal, current_node, neighbours_qvalues):
     pos = graphviz_layout(G_temp, prog='dot')
     nx.draw(G_temp, labels=labels, node_color=colors, pos = pos)
     plt.show()
-
+"""
 def test_for_graph(file):
     """Basically the same as the training function, but without training"""
     graph = nx.read_graphml(file)
@@ -163,8 +160,8 @@ def test_for_graph(file):
             for i, qvalue in enumerate(qvalues):
                 if action_mask[i] == 1:
                     node_qvalues_map[env.inverse_node_mapping[i]] = qvalue
-            if SHOW_GAPH_TEST:
-                show_graph(display_graph, target, env.current_node, node_qvalues_map)
+            #if SHOW_GAPH_TEST:
+                #show_graph(display_graph, target, env.current_node, node_qvalues_map)
             
             new_observation, reward, done, info, new_goal = env.step(action)
             total_reward += reward
@@ -181,9 +178,9 @@ def test_for_graph(file):
 
 
 
-INIT_EPS = 0.99
-EPS_DECAY = 0.999998
-MIN_EPS = 0.05
+INIT_EPS = 1
+EPS_DECAY = 0.99999999
+MIN_EPS = 0.90
 
 
 def define_targets(graph):
@@ -278,7 +275,7 @@ def execute_for_graph(file, training = True):
     windowed_success = 0
 
     num_episode_multiplier = len(target_nodes)
-    num_episodes = 1000
+    num_episodes = 3000
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -388,16 +385,6 @@ def execute_for_graph(file, training = True):
 
 
 
-def visualize(rewards):
-    # Visualization
-    window_size = 30
-    success_array = np.array(rewards)
-    success = np.convolve(success_array, np.ones((window_size,))/window_size, mode='valid')
-    plt.plot(success)
-    plt.show()
-
-
-
 SHOW_GAPH_TEST = False
 EPS = INIT_EPS
 
@@ -414,20 +401,20 @@ for root, dirs, files in os.walk(FOLDER):
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = 180
+nb_file_overall = int(len(all_files)*0.2)
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)
-nb_supervised_files = int(nb_files * 0.05)
-nb_training_files = int(nb_files *0.75)
-nb_testing_files = int(nb_files * 0.2)
+nb_supervised_files = int(nb_files * 0.005)
+nb_training_files = int(nb_files *0.895)
+nb_testing_files = int(nb_files * 0.1)
 
 
 supervised_training_files = all_files[:nb_supervised_files]
 training_files = all_files[nb_supervised_files:nb_supervised_files + nb_training_files]
 testing_files = all_files[nb_supervised_files + nb_training_files:]
 
-test_every = 10
+test_every = 100
 
 print(f"Executing supervised training ...")
 for i, file in enumerate(supervised_training_files):
@@ -441,22 +428,21 @@ for i, file in enumerate(supervised_training_files):
 
 
 print(f"Executing Training ...")
+start_time = time.time()
 
 changed_lr = False
 for i, file in enumerate(training_files):
-    if i > nb_training_files * 0.8 and not changed_lr:
-        SHOW_GAPH_TEST = True
-        changed_lr = True
-
     if file.endswith(".graphml"):
         print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
         execute_for_graph(file, True)
+        if i % 50 == 0:
+            agent.save_checkpoint(i)
         if i % test_every == 0:
             print(f"Executing Testing for {file}")
             reward, nb_found_keys, nb_keys = test_for_graph(file)
             print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+stop_training_time = time.time()
 
-print(f"Training done ")
 SHOW_GAPH_TEST = False
 
 print(f"Executing Testing ...")
@@ -471,6 +457,7 @@ for i, file in enumerate(testing_files):
         test_success_rate.append(nb_found_keys / nb_keys)
 
 print(f"Testing done with a mean reward of {np.mean(test_rewards)} and a success rate of {np.mean(test_success_rate)}")
+print(f"Training done in {stop_training_time - start_time} seconds")
 
 
 # Save Model

@@ -19,7 +19,7 @@ from torch_geometric.nn import global_mean_pool, global_add_pool, global_max_poo
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_self_loops, degree
 from torch.optim import Adam
-
+import os
 from torch.utils.tensorboard import SummaryWriter
 import random
 
@@ -47,29 +47,25 @@ class GraphQNetwork(torch.nn.Module):
         self.norm0 = GraphNorm(num_node_features)
         self.norm_edge = GraphNorm(num_edge_features)
 
-        self.conv1 = GATv2Conv(num_node_features , 10, edge_dim=num_edge_features, heads=2)
-        self.dynamic_weight_module1 = DynamicWeightModule(6, 27)
-        self.conv2 = GATv2Conv(27, 20, edge_dim=num_edge_features, heads=2)
-        self.dynamic_weight_module2 = DynamicWeightModule(6, 67)
-
-        self.conv3 = GATv2Conv(67, 30, edge_dim=num_edge_features)
-        self.dynamic_weight_module3 = DynamicWeightModule(6, 97)
+        self.conv1 = GATv2Conv(num_node_features + 2 + 6 , 10, edge_dim=num_edge_features, heads=2)
+        self.conv2 = GATv2Conv(35, 20, edge_dim=num_edge_features, heads=2)
+        self.conv3 = GATv2Conv(75, 30, edge_dim=num_edge_features)
+        self.conv4 = GATv2Conv(105, 30, edge_dim=num_edge_features)
 
 
-        self.dynamic_weight_module = DynamicWeightModule(6, num_node_features)
+        self.graph_embedder = torch.nn.Linear(135, 64)
+        self.graph_embedder_1 = torch.nn.Linear(64, 32)
+        self.graph_embedder_2 = torch.nn.Linear(32, 6)
+
+        self.subgraph_embedder = torch.nn.Linear(135, 64)
+        self.subgraph_embedder_1 = torch.nn.Linear(64, 32)
+        self.subgraph_embedder_2 = torch.nn.Linear(32, 6)
 
 
-        
+        self.state_embedder = torch.nn.Linear(147, 64)
+        self.state_embedder_1 = torch.nn.Linear(64, 32)
+        self.state_embedder_2 = torch.nn.Linear(32, 10)
 
-        self.node_embedder_stream = torch.nn.Linear(num_node_features + 2 + 6, 30)
-        self.node_embedder_stream_2 = torch.nn.Linear(30, 15)
-
-        self.node_embedder = torch.nn.Linear(15, num_node_features)
-
-        self.graph_embedder = torch.nn.Linear(97, 6)
-        self.subgraph_embedder = torch.nn.Linear(97, 6)
-
-        self.state_embedder = torch.nn.Linear(109, 10)
 
 
         # DQN layers
@@ -101,44 +97,49 @@ class GraphQNetwork(torch.nn.Module):
         edge_attr_in_mean = scatter_mean(edge_attr, edge_index[0], dim=0, dim_size=x.shape[0])
         edge_attr_out_mean = scatter_mean(edge_attr, edge_index[1], dim=0, dim_size=x.shape[0])
 
-        node_embed = torch.cat([x, edge_attr_in_mean, edge_attr_out_mean, goal[batch]], dim=-1)
-        x = F.relu(self.node_embedder_stream(node_embed))
-        x = F.relu(self.node_embedder_stream_2(x))
-        x = self.node_embedder(x)
+        x = torch.cat([x, edge_attr_in_mean, edge_attr_out_mean, goal[batch]], dim=-1)
 
         # Initial input features
         identity = x
 
         # First GAT layer with skip connection
-        x = F.relu(self.conv1(x, edge_index, edge_attr))
+        x = self.conv1(x, edge_index, edge_attr)
         # Subsequent GAT layers with skip connections
         x = torch.cat([x, identity], dim=1)  # Skip connection
 
         identity = x
-        x = F.relu(self.conv2(x, edge_index, edge_attr))
+        x = F.leaky_relu(self.conv2(x, edge_index, edge_attr))
         x = torch.cat([x, identity], dim=1)
 
         identity = x
-        x = F.relu(self.conv3(x, edge_index, edge_attr))
-        
+        x = F.leaky_relu(self.conv3(x, edge_index, edge_attr))
         x = torch.cat([x, identity], dim=1)
 
- 
-        graph_embedding_mean = global_mean_pool(x, batch)
-        graph_embedding_add = global_add_pool(x, batch)
-        graph_embedding = graph_embedding_mean + graph_embedding_add
+        identity = x
+        x = F.leaky_relu(self.conv4(x, edge_index, edge_attr))
+        x = torch.cat([x, identity], dim=1)
 
-        graph_embedding = self.graph_embedder(graph_embedding)
+
+ 
+        #graph_embedding_mean = global_mean_pool(x, batch)
+        graph_embedding_add = global_add_pool(x, batch)
+        graph_embedding = graph_embedding_add
+
+        graph_embedding = F.relu(self.graph_embedder(graph_embedding))
+        graph_embedding = F.relu(self.graph_embedder_1(graph_embedding))
+        graph_embedding = F.relu(self.graph_embedder_2(graph_embedding))
         
         # Extract subgraph embeddings using the adjusted indices
         subgraph_embeddings = x[visited_subgraph]
 
         # Compute the global mean for each subgraph
-        subgraph_embedding_mean = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        #subgraph_embedding_mean = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
         subgraph_embedding_add = global_add_pool(subgraph_embeddings, subgraph_node_indices_batch)
-        subgraph_embedding = subgraph_embedding_mean + subgraph_embedding_add
+        subgraph_embedding = subgraph_embedding_add
         subgraph_embedding = torch.cat([subgraph_embedding], dim=-1)
-        subgraph_embedding = self.subgraph_embedder(subgraph_embedding)
+        subgraph_embedding = F.relu(self.subgraph_embedder(subgraph_embedding))
+        subgraph_embedding = F.relu(self.subgraph_embedder_1(subgraph_embedding))
+        subgraph_embedding = F.relu(self.subgraph_embedder_2(subgraph_embedding))
 
 
         #concat the graph level embedding with each node of the corresponding graph with batch
@@ -146,7 +147,9 @@ class GraphQNetwork(torch.nn.Module):
         conc_state = torch.cat([x, graph_embedding[batch], subgraph_embedding[batch]], dim=-1)
 
 
-        state_embedding = self.state_embedder(conc_state)
+        state_embedding = F.relu(self.state_embedder(conc_state))
+        state_embedding = F.relu(self.state_embedder_1(state_embedding))
+        state_embedding = F.relu(self.state_embedder_2(state_embedding))
 
         qvals_stream = F.relu(self.qvalue_stream(state_embedding))
         qvals_goal = torch.cat([qvals_stream, goal[batch]], dim=-1)
@@ -168,7 +171,6 @@ class GraphQNetwork(torch.nn.Module):
             raise ValueError("Qvals contains nan")
 
         return qvals
-
 
 
 
@@ -196,8 +198,8 @@ class Agent:
         self.qnetwork_target = GraphQNetwork(state_size, self.edge_attr_size,seed).to(device)
 
         class_name = self.qnetwork_local.__class__.__name__
-        name = f"VACTION_SPACE_GOAL_{class_name}_{date}"
-        name = f"runs/{name}"
+        self.file_name = f"VACTION_SPACE_GOAL_{class_name}_{date}"
+        name = f"runs/{self.file_name}"
         self.writer = SummaryWriter(name)  # Choose an appropriate experiment name
         #init the weights of the target network to be the same as the local network
         self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
@@ -304,23 +306,20 @@ class Agent:
 
             return random.choice(choices).item()
     
-    def save_checkpoint(self, filename):
-        checkpoint = {
-            'qnetwork_local_state_dict': self.qnetwork_local.state_dict(),
-            'qnetwork_target_state_dict': self.qnetwork_target.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'memory': self.memory,  # Optional: save replay memory
-            'steps': self.steps  # Optional: save training steps
-        }
-        torch.save(checkpoint, filename)
+    def save_checkpoint(self, nb_training):
+        # Create directory if it does not exist
+        directory = f"models/rl/{self.file_name}"
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        # File name for saving the checkpoint
+        name = f"{directory}/{nb_training}_{self.losses[-1]:.2f}.pt"
+
+        # Save the model
+        torch.save(self.qnetwork_local.state_dict(), name)
 
     def load_checkpoint(self, filename):
-        checkpoint = torch.load(filename)
-        self.qnetwork_local.load_state_dict(checkpoint['qnetwork_local_state_dict'])
-        self.qnetwork_target.load_state_dict(checkpoint['qnetwork_target_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.memory = checkpoint.get('memory', self.memory)  # Load memory if saved
-        self.steps = checkpoint.get('steps', self.steps)  # Load steps if saved
+        self.qnetwork_local.load_state_dict(torch.load(filename))
 
     def learn(self, experiences, indices, is_weights, gamma):
         # Create a list of Data objects, each representing a graph experience
