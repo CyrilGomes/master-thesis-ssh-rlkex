@@ -162,13 +162,9 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 1
-        self.STEP_PENALTY = 0
-        self.REVISIT_PENALTY = 0
-        self.PROXIMITY_MULTIPLIER = 0
-        self.NEW_NODE_BONUS = 0
-        self.NO_PATH_PENALTY = 0
-        self.ADDITIONAL_TARGET_MULTIPLIER = 1.25
+        self.TARGET_FOUND_REWARD = 3
+        self.PROXIMITY_MULTIPLIER = 0.4
+        self.NO_PATH_PENALTY = -0.5
 
 
     def _get_closest_target(self):
@@ -372,16 +368,20 @@ class GraphTraversalEnv(gym.Env):
         #convert the id from Data to the id from the graph
         action = self.inverse_node_mapping[action]
 
+        prev_dist = self._get_dist_to_target()
 
         self._perform_action(action)
 
-    
-        #check if at least one target is reachable
-
-
-        has_found_target = self.current_node == self.target_node
+        new_dist = self._get_dist_to_target()
         reward = 0
 
+        has_found_target = self.current_node == self.target_node
+
+        if not has_found_target:
+            if new_dist is None and prev_dist is not None:
+                reward -= self.NO_PATH_PENALTY
+            elif new_dist is not None:
+                    reward += self.PROXIMITY_MULTIPLIER
 
         self.nb_actions_taken += 1
 
@@ -390,9 +390,10 @@ class GraphTraversalEnv(gym.Env):
         if has_found_target:
             
             obs = self._get_obs()
-            reward = 1
+            reward = self.TARGET_FOUND_REWARD
             return obs, reward, True, self._episode_info(found_target=True), new_goal
         elif self.graph.out_degree(self.current_node) == 0:
+            reward = -1
 
             #prob_of_new_target = 0.5
             #if self.current_node in self.target_nodes:
@@ -582,7 +583,7 @@ class GraphTraversalEnv(gym.Env):
         if x.shape[1] != self.state_size:
             raise ValueError(f"The shape of x ({x.shape[1]}) does not match self.state_size ({self.state_size})")
         
-        transform = T.Compose([T.ToUndirected()])
+        #transform = T.Compose([T.ToUndirected()])
 
         #reverse edges
         #edge_index = edge_index.flip(dims=[0])

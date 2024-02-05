@@ -59,73 +59,14 @@ FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
-
-
-
+agent.load_checkpoint("/root/ssh-rlkex/models/complex_model_with_inter_reward_0812.pt")
 
 def check_parameters(env):
 
     if env.observation_space.spaces['x'].shape[0] != STATE_SPACE:
         raise ValueError("State space is not correct")
     
-    
 
-
-
-"""
-def show_graph(graph, goal, current_node, neighbours_qvalues):
-    #for all target nodes, if the value of target_nodes[node] is 0 then label is 'A', if 1 then label is 'B', etc.. up to 5 (F)
-    labels = {}
-    for node, attributes in graph.nodes(data=True):
-        if attributes['cat'] >= 0:
-            labels[str(node)] = chr(ord('A') + attributes['cat'])
-            #if is goal concatenate with "G"
-            if node == goal:
-                labels[str(node)] = labels[str(node)] + " G"
-
-        elif node == current_node:
-            labels[str(node)] = "X"
-        else:
-            labels[str(node)] = ""
-        #if node is a neighbou concatenate the qvalue
-        if node in neighbours_qvalues:
-            labels[str(node)] = f"{labels[str(node)]} : {neighbours_qvalues[node].item():.2f}"
-    #set colors of target nodes to red
-            
-    #set colors of neighbours as a heatmap of the qvalues, closer to 1 is red, closer to 0 is blue
-    colors = []
-    for node, attributes in graph.nodes(data=True):
-        if attributes['cat'] >= 0:
-            colors.append((1, 0, 0))
-        elif node == current_node:
-            colors.append((0, 1, 0))
-        elif node in neighbours_qvalues:
-            
-            min_qvalue = min(neighbours_qvalues.values()).item()
-            max_qvalue = max(neighbours_qvalues.values()).item()
-
-
-            qvalue = neighbours_qvalues[node] 
-
-            #convert qvalue to regular float
-            qvalue = qvalue.item()
-            
-
-            #normalize between 0 and 1 in case
-            qvalue = 0 if max_qvalue == min_qvalue else (qvalue - min_qvalue) / (max_qvalue - min_qvalue)
-            
-            colors.append((qvalue, 0, 1 - qvalue))
-        else:
-            colors.append((0, 0, 0))
-    
-    G_temp = nx.DiGraph()
-    G_temp.add_nodes_from(str(n) for n in graph.nodes())    
-    G_temp.add_edges_from((str(u), str(v)) for u, v in graph.edges())
-    #draw the graph with labels and colors
-    pos = graphviz_layout(G_temp, prog='dot')
-    nx.draw(G_temp, labels=labels, node_color=colors, pos = pos)
-    plt.show()
-"""
 def test_for_graph(file):
     """Basically the same as the training function, but without training"""
     graph = nx.read_graphml(file)
@@ -179,8 +120,8 @@ def test_for_graph(file):
 
 
 INIT_EPS = 1
-EPS_DECAY = 0.99999999
-MIN_EPS = 0.90
+EPS_DECAY = 0.999999
+MIN_EPS = 0.05
 
 
 def define_targets(graph):
@@ -401,7 +342,7 @@ for root, dirs, files in os.walk(FOLDER):
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = int(len(all_files)*0.2)
+nb_file_overall = int(len(all_files)*0.3)
 all_files = all_files[:nb_file_overall]
 
 nb_files = len(all_files)

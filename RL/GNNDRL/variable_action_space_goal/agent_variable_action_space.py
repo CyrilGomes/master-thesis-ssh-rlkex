@@ -191,6 +191,7 @@ class Agent:
         self.gamma = gamma
         self.tau = tau
         self.update_every = update_every
+        self.lr = lr
 
 
         # Q-Network
@@ -320,6 +321,9 @@ class Agent:
 
     def load_checkpoint(self, filename):
         self.qnetwork_local.load_state_dict(torch.load(filename))
+        self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
+
+        self.optimizer = Adam(self.qnetwork_local.parameters(), lr=self.lr)
 
     def learn(self, experiences, indices, is_weights, gamma):
         # Create a list of Data objects, each representing a graph experience
