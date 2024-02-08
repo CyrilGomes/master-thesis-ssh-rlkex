@@ -29,7 +29,7 @@ def compute_reward(has_found_target,
     #print(f"Distance reward: {distance_reward}, Step penalty: {STEP_PENALTY}, Revisit penalty: {revisit_penalty}, New node bonus: {new_node_bonus}")
     return total_reward
 class GraphTraversalEnv(gym.Env):
-    def __init__(self, graph, target_nodes, root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib", max_episode_steps=20, obs_is_full_graph=False):
+    def __init__(self, graph, target_nodes, root_detector, max_episode_steps=20, obs_is_full_graph=False):
         """
         Initializes the Graph Traversal Environment.
 
@@ -59,8 +59,7 @@ class GraphTraversalEnv(gym.Env):
 
         self._init_rewards_and_penalties()
         #load model
-        self.root_detection_model_path = root_detection_model_path
-        self.root_detector = GraphPredictor(self.root_detection_model_path)
+        self.root_detector = root_detector
         print("Model loaded!")
         #get proba for all root nodes, returns a map of root node -> proba
         self.root_proba = self.root_detector.predict_probabilities(self.main_graph)
@@ -121,6 +120,8 @@ class GraphTraversalEnv(gym.Env):
         print("------------------------------------------------------------------------")
 
 
+    def get_number_of_nodes(self):
+        return len(self.graph.nodes)
 
     def _get_best_root(self):
 
@@ -162,7 +163,7 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 3
+        self.TARGET_FOUND_REWARD = 2
         self.PROXIMITY_MULTIPLIER = 0.4
         self.NO_PATH_PENALTY = -0.5
 
@@ -487,7 +488,7 @@ class GraphTraversalEnv(gym.Env):
             Data: Initial observation data after resetting.
         """
         self.graph = self.reference_graph.copy()
-
+        self.data = None
         self.current_target_iterator = 0
         self.current_node_iterator = 0
         self.current_node = self._sample_start_node()
@@ -532,6 +533,9 @@ class GraphTraversalEnv(gym.Env):
         
 
     def _get_obs(self):
+
+        if self.data is not None:
+            return self.data
 
 
         # Use the node mapping to convert node indices
@@ -588,9 +592,9 @@ class GraphTraversalEnv(gym.Env):
         #reverse edges
         #edge_index = edge_index.flip(dims=[0])
 
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+        self.data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
         #data = transform(data)
-        return data
+        return self.data
 
     def close(self):
         pass

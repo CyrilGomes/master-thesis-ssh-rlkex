@@ -12,6 +12,7 @@ import torch_geometric
 from torch_geometric.data import Data
 from torch_geometric.nn import SAGEConv, global_mean_pool
 from torch_scatter import scatter_max
+from root_heuristic_rf import GraphPredictor
 
 from rl_env_graph_obs_variable_action_space import GraphTraversalEnv
 from collections import deque
@@ -39,6 +40,7 @@ import time
 from agent_variable_action_space import Agent
 from utils import preprocess_graph, convert_types, add_global_root_node, connect_components, remove_all_isolated_nodes
 from networkx.drawing.nx_pydot import graphviz_layout
+import concurrent.futures
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -59,7 +61,9 @@ FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
-agent.load_checkpoint("/root/ssh-rlkex/models/complex_model_with_inter_reward_0812.pt")
+agent.load_checkpoint("/root/ssh-rlkex/models/model_75_succ.pt")
+root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib"
+root_detector = GraphPredictor(root_detection_model_path)
 
 def check_parameters(env):
 
@@ -67,16 +71,14 @@ def check_parameters(env):
         raise ValueError("State space is not correct")
     
 
-def test_for_graph(file):
+def test_for_graph(graph):
     """Basically the same as the training function, but without training"""
-    graph = nx.read_graphml(file)
-    graph = preprocess_graph(graph)
 
     #get all target_nodes, check if nodes has 'cat' = 1
     target_nodes = define_targets(graph=graph)
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True, root_detector=root_detector)
     check_parameters(env)
 
     
@@ -120,38 +122,38 @@ def test_for_graph(file):
 
 
 INIT_EPS = 1
-EPS_DECAY = 0.999999
-MIN_EPS = 0.05
+EPS_DECAY = 0.999998
+MIN_EPS = 0.03
 
 
 def define_targets(graph):
     target_nodes_map = {}
     for node, attributes in graph.nodes(data=True):
-        if attributes['cat'] >= 0:
+        cat_value = attributes['cat']
+        if cat_value >= 0 and cat_value <= 3: #Only take the encryption and initialization keys, ignore integrity keys
             target_nodes_map[node] = attributes['cat'] 
     return target_nodes_map
 
 
 
-def supervised_training(file):
-    graph = nx.read_graphml(file)
-    graph = preprocess_graph(graph)
+def supervised_training(graph):
 
     #get all target_nodes, check if nodes has 'cat' = 1
     target_nodes = define_targets(graph=graph)
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
-
+    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True, root_detector=root_detector)
+    nb_of_nodes = env.get_number_of_nodes()
     check_parameters(env)
     windowed_success = 0
 
-    num_episode_multiplier = len(target_nodes)
-    num_episodes = 300
+    num_episode_multiplier = 1
+    if nb_of_nodes > 100:
+        num_episode_multiplier = 2
+    num_episodes = 300 * num_episode_multiplier
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_key_found = 0
 
-    
 
     
     for episode in range_episode:
@@ -202,21 +204,27 @@ def supervised_training(file):
 
 
 
-def execute_for_graph(file, training = True):
-    graph = nx.read_graphml(file)
-    graph = preprocess_graph(graph)
+def execute_for_graph(graph, training = True):
 
     #get all target_nodes, check if nodes has 'cat' = 1
     target_nodes = define_targets(graph=graph)
     episode_rewards = []
     #data = graph_to_data(graph)
-    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True)
+    env = GraphTraversalEnv(graph, target_nodes, obs_is_full_graph=True, root_detector=root_detector)
 
     check_parameters(env)
     windowed_success = 0
 
-    num_episode_multiplier = len(target_nodes)
-    num_episodes = 3000
+    nb_of_nodes = env.get_number_of_nodes()
+
+
+
+    num_episode_multiplier = 1
+    if nb_of_nodes > 200:
+        num_episode_multiplier = 2
+    elif nb_of_nodes > 400:
+        num_episode_multiplier = 3
+    num_episodes = 3000 * num_episode_multiplier
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -324,6 +332,10 @@ def execute_for_graph(file, training = True):
         #    print(f"Episode {episode + 1}: Reward = {episode_reward} \t Nb_Moves = {episode_stats['nb_of_moves']} \t Nb_Success = {stats['nb_success']} / {episode + 1}")
 
 
+def read_graph(file):
+    graph = nx.read_graphml(file)
+    graph = preprocess_graph(graph)
+    return graph
 
 
 SHOW_GAPH_TEST = False
@@ -342,46 +354,54 @@ for root, dirs, files in os.walk(FOLDER):
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = int(len(all_files)*0.3)
+nb_file_overall = int(len(all_files)*0.2)
 all_files = all_files[:nb_file_overall]
 
-nb_files = len(all_files)
+all_graphs = []
+print(f"Reading {len(all_files)} graphs ...")
+with concurrent.futures.ProcessPoolExecutor() as executor:
+    # Map the read_graph function to all files
+    results = list(tqdm(executor.map(read_graph, all_files), total=len(all_files)))
+    all_graphs.extend(results)
+
+nb_files = len(all_graphs)
 nb_supervised_files = int(nb_files * 0.005)
 nb_training_files = int(nb_files *0.895)
 nb_testing_files = int(nb_files * 0.1)
 
 
-supervised_training_files = all_files[:nb_supervised_files]
-training_files = all_files[nb_supervised_files:nb_supervised_files + nb_training_files]
-testing_files = all_files[nb_supervised_files + nb_training_files:]
+supervised_training_graphs = all_graphs[:nb_supervised_files]
+training_graphs = all_graphs[nb_supervised_files:nb_supervised_files + nb_training_files]
+testing_graphs = all_graphs[nb_supervised_files + nb_training_files:]
 
 test_every = 100
 
 print(f"Executing supervised training ...")
-for i, file in enumerate(supervised_training_files):
-    if file.endswith(".graphml"):
-        print(f"[{i} / {nb_supervised_files}] : Executing Training for {file}")
-        supervised_training(file)
-        if i % test_every == 0:
-            print(f"Executing Testing for {file}")
-            reward, nb_found_keys, nb_keys = test_for_graph(file)
-            print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+for i, graph in enumerate(supervised_training_graphs):
+    file = all_files[i]
+    print(f"[{i} / {nb_supervised_files}] : Executing Training for {file}")
+    supervised_training(graph)
+    if i % test_every == 0:
+        print(f"Executing Testing for {file}")
+        reward, nb_found_keys, nb_keys = test_for_graph(graph)
+        print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
 
 
 print(f"Executing Training ...")
 start_time = time.time()
 
 changed_lr = False
-for i, file in enumerate(training_files):
-    if file.endswith(".graphml"):
-        print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
-        execute_for_graph(file, True)
-        if i % 50 == 0:
-            agent.save_checkpoint(i)
-        if i % test_every == 0:
-            print(f"Executing Testing for {file}")
-            reward, nb_found_keys, nb_keys = test_for_graph(file)
-            print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+for i, graph in enumerate(training_graphs):
+    file = all_files[i]
+
+    print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
+    execute_for_graph(graph, True)
+    if i % 50 == 0:
+        agent.save_checkpoint(i)
+    if i % test_every == 0:
+        print(f"Executing Testing for {file}")
+        reward, nb_found_keys, nb_keys = test_for_graph(graph)
+        print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
 stop_training_time = time.time()
 
 SHOW_GAPH_TEST = False
@@ -389,13 +409,14 @@ SHOW_GAPH_TEST = False
 print(f"Executing Testing ...")
 test_rewards = []
 test_success_rate = []
-for i, file in enumerate(testing_files):
-    if file.endswith(".graphml"):
-        print(f"[{i} / {nb_testing_files}] : Executing Testing for {file}")
-        reward, nb_found_keys, nb_keys = test_for_graph(file)
-        print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
-        test_rewards.append(reward)
-        test_success_rate.append(nb_found_keys / nb_keys)
+for i, graph in enumerate(testing_graphs):
+    file = all_files[i]
+
+    print(f"[{i} / {nb_testing_files}] : Executing Testing for {file}")
+    reward, nb_found_keys, nb_keys = test_for_graph(graph)
+    print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+    test_rewards.append(reward)
+    test_success_rate.append(nb_found_keys / nb_keys)
 
 print(f"Testing done with a mean reward of {np.mean(test_rewards)} and a success rate of {np.mean(test_success_rate)}")
 print(f"Training done in {stop_training_time - start_time} seconds")
