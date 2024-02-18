@@ -75,9 +75,6 @@ class GraphTraversalEnv(gym.Env):
         self.best_root, ref_graph = self._get_best_root()
         #update the graph to be the subgraph of the root (using BFS)
         self.reference_graph = ref_graph
-        centralities = self.compute_centralities(graph=ref_graph)
-        for node in ref_graph.nodes():
-            ref_graph.nodes[node].update(centralities[node])
 
         #create a copy of the reference graph
         self.graph = self.reference_graph.copy()
@@ -163,9 +160,11 @@ class GraphTraversalEnv(gym.Env):
             raise ValueError("Graph should be a NetworkX graph.")
 
     def _init_rewards_and_penalties(self):
-        self.TARGET_FOUND_REWARD = 2
-        self.PROXIMITY_MULTIPLIER = 0.4
-        self.NO_PATH_PENALTY = -0.5
+        self.TARGET_FOUND_REWARD = 10
+        self.PROXIMITY_MULTIPLIER = 4
+        self.INCORRECT_TARGET_REWARD = -10
+        self.NO_PATH_PENALTY = -10
+        self.NO_TARGET_FOUND_PENALTY = -10
 
 
     def _get_closest_target(self):
@@ -296,8 +295,6 @@ class GraphTraversalEnv(gym.Env):
 
 
 
-
-
     def _get_best_action(self):
         """
         Gets the best action to take from the current node.
@@ -394,7 +391,8 @@ class GraphTraversalEnv(gym.Env):
             reward = self.TARGET_FOUND_REWARD
             return obs, reward, True, self._episode_info(found_target=True), new_goal
         elif self.graph.out_degree(self.current_node) == 0:
-            reward = -1
+
+            reward = self.INCORRECT_TARGET_REWARD if self.current_node in self.target_nodes else self.NO_TARGET_FOUND_PENALTY 
 
             #prob_of_new_target = 0.5
             #if self.current_node in self.target_nodes:
@@ -487,7 +485,7 @@ class GraphTraversalEnv(gym.Env):
         Returns:
             Data: Initial observation data after resetting.
         """
-        self.graph = self.reference_graph.copy()
+        #self.graph = self.reference_graph.copy()
         self.data = None
         self.current_target_iterator = 0
         self.current_node_iterator = 0

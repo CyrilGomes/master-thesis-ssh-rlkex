@@ -43,34 +43,60 @@ class GraphQNetwork(torch.nn.Module):
         super(GraphQNetwork, self).__init__()
         self.seed = torch.manual_seed(seed)
 
+
+        # Goal-specific branches as a list of modules
+        self.goal_branches = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(15, 16),
+                torch.nn.ReLU(),
+                torch.nn.Linear(16, 8)
+            ) for _ in range(6)
+        ])
+
+
         # Define GAT layers
         self.norm0 = GraphNorm(num_node_features)
         self.norm_edge = GraphNorm(num_edge_features)
 
-        self.conv1 = GATv2Conv(num_node_features + 2 + 6 , 10, edge_dim=num_edge_features, heads=2)
-        self.conv2 = GATv2Conv(35, 20, edge_dim=num_edge_features, heads=2)
-        self.conv3 = GATv2Conv(75, 30, edge_dim=num_edge_features)
-        self.conv4 = GATv2Conv(105, 30, edge_dim=num_edge_features)
+        self.conv1 = GATv2Conv(num_node_features + 2 , 3, edge_dim=num_edge_features, heads=2) #  15 + 6 = 21
+        #self.conv2 = GATv2Conv(21, 2, edge_dim=num_edge_features, heads=2) # 21 + 4 = 25
+        #self.conv3 = GATv2Conv(25, 2, edge_dim=num_edge_features) # 25 + 2 = 27
+
+        # Layer to integrate goal-specific output with general features
+        self.merge_layer = torch.nn.Linear(23, 32)  # Adjust sizes accordingly
 
 
-        self.graph_embedder = torch.nn.Linear(135, 64)
-        self.graph_embedder_1 = torch.nn.Linear(64, 32)
-        self.graph_embedder_2 = torch.nn.Linear(32, 6)
+        self.graph_embedder = torch.nn.Linear(32, 12)
+        self.graph_embedder_1 = torch.nn.Linear(12, 12)
+        self.graph_embedder_2 = torch.nn.Linear(12, 6)
 
-        self.subgraph_embedder = torch.nn.Linear(135, 64)
-        self.subgraph_embedder_1 = torch.nn.Linear(64, 32)
-        self.subgraph_embedder_2 = torch.nn.Linear(32, 6)
+        self.subgraph_embedder = torch.nn.Linear(32, 12)
+        self.subgraph_embedder_1 = torch.nn.Linear(12, 12)
+        self.subgraph_embedder_2 = torch.nn.Linear(12, 6)
+
+        #28 + 12 =  
+
+        self.state_goal_branches = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(44, 16),
+                torch.nn.ReLU(),
+                torch.nn.Linear(16, 12),
+                torch.nn.ReLU(),
+                torch.nn.Linear(12, 10)
+            ) for _ in range(6)
+        ])
 
 
-        self.state_embedder = torch.nn.Linear(147, 64)
-        self.state_embedder_1 = torch.nn.Linear(64, 32)
-        self.state_embedder_2 = torch.nn.Linear(32, 10)
+        self.qvalue_goal_branches = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(10, 8),
+                torch.nn.ReLU(),
+                torch.nn.Linear(8, 4),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4, 1)
+            ) for _ in range(6)
+        ])
 
-
-
-        # DQN layers
-        self.qvalue_stream = torch.nn.Linear(10, 6)
-        self.qvalue = torch.nn.Linear(12, 1)
         
 
     def forward(self, x, edge_index, edge_attr, batch , action_mask, goal, visited_subgraph, subgraph_node_indices_batch):  
@@ -88,7 +114,6 @@ class GraphQNetwork(torch.nn.Module):
 
         batch = batch.to(x.get_device())
 
-
         # Process with GAT layers
         x = self.norm0(x, batch)
         edge_attr = self.norm_edge(edge_attr, batch[edge_index[0]])
@@ -97,7 +122,7 @@ class GraphQNetwork(torch.nn.Module):
         edge_attr_in_mean = scatter_mean(edge_attr, edge_index[0], dim=0, dim_size=x.shape[0])
         edge_attr_out_mean = scatter_mean(edge_attr, edge_index[1], dim=0, dim_size=x.shape[0])
 
-        x = torch.cat([x, edge_attr_in_mean, edge_attr_out_mean, goal[batch]], dim=-1)
+        x = torch.cat([x, edge_attr_in_mean, edge_attr_out_mean], dim=-1)
 
         # Initial input features
         identity = x
@@ -105,67 +130,82 @@ class GraphQNetwork(torch.nn.Module):
         # First GAT layer with skip connection
         x = self.conv1(x, edge_index, edge_attr)
         # Subsequent GAT layers with skip connections
-        x = torch.cat([x, identity], dim=1)  # Skip connection
+        x_base = torch.cat([x, identity], dim=1)  # Skip connection
 
-        identity = x
-        x = F.leaky_relu(self.conv2(x, edge_index, edge_attr))
-        x = torch.cat([x, identity], dim=1)
+        goal_indices = goal.argmax(dim=1)  # Assuming one-hot encoded goals
+        #expand goal indices for each node of the correpsonding batch
+        goal_indices = goal_indices[batch]
 
-        identity = x
-        x = F.leaky_relu(self.conv3(x, edge_index, edge_attr))
-        x = torch.cat([x, identity], dim=1)
+        x_goal_specific = torch.zeros_like(x_base[:,:8])  # Adjust size accordingly
+        # Iterate over each goal-specific branch
+        for i, branch in enumerate(self.goal_branches):
+            mask = goal_indices == i
+            if mask.any():  # Check if the current goal index is present in the batch
+                x_goal_specific[mask] = branch(x_base[mask])
 
-        identity = x
-        x = F.leaky_relu(self.conv4(x, edge_index, edge_attr))
-        x = torch.cat([x, identity], dim=1)
+        # Combine goal-specific output with the base features
+        merged = torch.cat([x_base, x_goal_specific], dim=1)
+        x = self.merge_layer(merged)
 
+        #identity = x
+        #x = F.leaky_relu(self.conv2(x, edge_index, edge_attr))
+        #x = torch.cat([x, identity], dim=1)
+
+        #identity = x
+        #x = F.leaky_relu(self.conv3(x, edge_index, edge_attr))
+        #x = torch.cat([x, identity], dim=1)
 
  
         #graph_embedding_mean = global_mean_pool(x, batch)
-        graph_embedding_add = global_add_pool(x, batch)
+        graph_embedding_add = global_mean_pool(x, batch)
         graph_embedding = graph_embedding_add
 
         graph_embedding = F.relu(self.graph_embedder(graph_embedding))
         graph_embedding = F.relu(self.graph_embedder_1(graph_embedding))
-        graph_embedding = F.relu(self.graph_embedder_2(graph_embedding))
+        graph_embedding = self.graph_embedder_2(graph_embedding)
+        graph_embedding = F.dropout(graph_embedding, p=0.5, training=self.training)
         
         # Extract subgraph embeddings using the adjusted indices
         subgraph_embeddings = x[visited_subgraph]
 
         # Compute the global mean for each subgraph
         #subgraph_embedding_mean = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
-        subgraph_embedding_add = global_add_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        subgraph_embedding_add = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
         subgraph_embedding = subgraph_embedding_add
         subgraph_embedding = torch.cat([subgraph_embedding], dim=-1)
         subgraph_embedding = F.relu(self.subgraph_embedder(subgraph_embedding))
+        subgraph_embedding = F.dropout(subgraph_embedding, p=0.2, training=self.training)
         subgraph_embedding = F.relu(self.subgraph_embedder_1(subgraph_embedding))
-        subgraph_embedding = F.relu(self.subgraph_embedder_2(subgraph_embedding))
-
+        subgraph_embedding = self.subgraph_embedder_2(subgraph_embedding)
 
         #concat the graph level embedding with each node of the corresponding graph with batch
 
         conc_state = torch.cat([x, graph_embedding[batch], subgraph_embedding[batch]], dim=-1)
 
 
-        state_embedding = F.relu(self.state_embedder(conc_state))
-        state_embedding = F.relu(self.state_embedder_1(state_embedding))
-        state_embedding = F.relu(self.state_embedder_2(state_embedding))
+        state_embedding = torch.zeros_like(conc_state[:,:10])  # Adjust size accordingly
+        # Iterate over each goal-specific branch
+        for i, branch in enumerate(self.state_goal_branches):
+            mask = goal_indices == i
+            if mask.any():
+                state_embedding[mask] = branch(conc_state[mask])
 
-        qvals_stream = F.relu(self.qvalue_stream(state_embedding))
-        qvals_goal = torch.cat([qvals_stream, goal[batch]], dim=-1)
-
-        qvals = self.qvalue(qvals_goal)
+        # Compute Q-values for each goal
+        qvals = torch.zeros(x.shape[0]).to(x.get_device())
+        for i, branch in enumerate(self.qvalue_goal_branches):
+            mask = goal_indices == i
+            if mask.any():
+                qvals[mask] = branch(state_embedding[mask]).squeeze()
 
 
         # Apply action mask if provided
         if action_mask is not None:
             action_mask = action_mask.to(qvals.device)
 
-            action_mask = action_mask.unsqueeze(1)
+            #action_mask = action_mask.unsqueeze(1)
             # Set Q-values of valid actions (where action_mask is 1) as is, and others to -inf should be on dimension 0
             qvals = torch.where(action_mask == 1, qvals, torch.tensor(-1e+8).to(qvals.device))
         
-
         #check if qvals contains nan
         if torch.isnan(qvals).any():
             raise ValueError("Qvals contains nan")
@@ -214,6 +254,7 @@ class Agent:
         self.buffer = Memory(capacity=buffer_size)
         
         self.t_step = 0
+        self.tau_step = 0
 
         self.losses = []
         self.steps = 0
@@ -246,6 +287,7 @@ class Agent:
 
     def step(self, state, action, reward, next_state, done, next_action_mask, goal, visited_subgraph, next_visited_subgraph):
         self.steps += 1
+        self.tau_step += 1
         #ensure everything is on device
         state = state
         next_state = next_state
@@ -259,6 +301,10 @@ class Agent:
             if len(self.buffer) > self.batch_size:
                 indices, experiences, is_weights = self.buffer.sample(self.batch_size)
                 self.learn(experiences, indices, is_weights,  self.gamma)
+        self.tau_step = (self.tau_step + 1) % self.tau
+        if self.tau_step == 0:
+            #do a hard update of the target network
+            self.qnetwork_target.load_state_dict(self.qnetwork_local.state_dict())
 
 
     def get_qvalues(self, state, action_mask, goal, visited_subgraph):
@@ -434,7 +480,7 @@ class Agent:
             # Soft update target network
 
 
-            self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
+            #self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
 
             # Update priorities, losses for logging, etc.
             td_error = td_error.detach().cpu().numpy()

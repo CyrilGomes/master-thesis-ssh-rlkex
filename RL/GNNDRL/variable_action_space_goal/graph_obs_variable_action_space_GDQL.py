@@ -50,18 +50,18 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(1e6)  # replay buffer size
-BATCH_SIZE = 1000         # batch size
+BUFFER_SIZE = int(2e6)  # replay buffer size
+BATCH_SIZE = 350         # batch size
 GAMMA = 0.99            # discount factor
-TAU = 0.05              # soft update of target parameters
-LR = 0.001               # learning rate
-UPDATE_EVERY = 200        # how often to update the network
+TAU = 100              # soft update of target parameters
+LR = 0.0001               # learning rate
+UPDATE_EVERY = 25        # how often to update the network
 
 FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
-agent.load_checkpoint("/root/ssh-rlkex/models/model_75_succ.pt")
+agent.load_checkpoint("/root/ssh-rlkex/models/smol_model_30.pt")
 root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib"
 root_detector = GraphPredictor(root_detection_model_path)
 
@@ -119,10 +119,8 @@ def test_for_graph(graph):
   
 
 
-
-
 INIT_EPS = 1
-EPS_DECAY = 0.999998
+EPS_DECAY = 0.999997
 MIN_EPS = 0.03
 
 
@@ -150,7 +148,7 @@ def supervised_training(graph):
     num_episode_multiplier = 1
     if nb_of_nodes > 100:
         num_episode_multiplier = 2
-    num_episodes = 300 * num_episode_multiplier
+    num_episodes = 20 * num_episode_multiplier
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_key_found = 0
 
@@ -204,6 +202,41 @@ def supervised_training(graph):
 
 
 
+
+def sample_goal(target_nodes, nb_keys_found):
+    # Extract the goal indices from target_nodes values
+    goal_indices = list(target_nodes.values())
+    
+    # Determine the number of keys found for each goal
+    relevant_nb_keys_found = np.array([nb_keys_found[i] for i in goal_indices])
+    
+    # Identify visited and unvisited goals
+    unvisited_goals_indices = np.where(relevant_nb_keys_found == 0)[0]
+    visited_goals_indices = np.where(relevant_nb_keys_found > 0)[0]
+    
+    # Initialize probabilities array
+    probabilities = np.zeros(len(goal_indices))
+    
+    # Assign probabilities for unvisited goals
+    if len(unvisited_goals_indices) > 0:
+        probabilities[unvisited_goals_indices] = 1 / len(unvisited_goals_indices)
+    
+    # Adjust probabilities for visited goals
+    if len(visited_goals_indices) > 0:
+        # For visited goals, calculate inverse of keys found for normalization
+        visited_inverse = 1 / relevant_nb_keys_found[visited_goals_indices]
+        total_visited_inverse = np.sum(visited_inverse)
+        
+        # Normalize and allocate remaining probability to visited goals
+        probabilities[visited_goals_indices] = (visited_inverse / total_visited_inverse) * (1 - np.sum(probabilities[unvisited_goals_indices]))
+    
+    # Convert target_nodes keys (node IDs) to a list for sampling
+    node_ids = list(target_nodes.keys())
+    
+    # Sample a node ID based on the calculated probabilities
+    chosen_node_id = random.choices(node_ids, weights=probabilities, k=1)[0]
+
+    return chosen_node_id
 def execute_for_graph(graph, training = True):
 
     #get all target_nodes, check if nodes has 'cat' = 1
@@ -251,7 +284,7 @@ def execute_for_graph(graph, training = True):
         curr_episode_rewards = []
         done = False
 
-        goal = random.choice(list(target_nodes.keys()))
+        goal = sample_goal(target_nodes, nb_keys_found)
         goal = target_nodes[goal]
         goal_one_hot = env.get_goal_one_hot(goal)
         env.set_target_goal(goal)
@@ -341,76 +374,97 @@ def read_graph(file):
 SHOW_GAPH_TEST = False
 EPS = INIT_EPS
 
-#get all files in the folder recursively
+TEST_FOLDER = "Test_Graphs/"
+
+N = 3  # Set the number of files you want from each subfolder
+
+# Get all files in the folder recursively
 all_files = []
 for root, dirs, files in os.walk(FOLDER):
+    count = 0  # Initialize counter for each subfolder
     for file in files:
         if file.endswith(".graphml"):
             all_files.append(os.path.join(root, file))
-
-
-
+            count += 1  # Increment counter
+        if count >= N:  # Check if counter has reached N
+            break  # If so, break the loop and move on to the next subfolder
 
 #shuffle the files
 random.shuffle(all_files)
 
-nb_file_overall = int(len(all_files)*0.2)
+nb_file_overall = int(len(all_files))
 all_files = all_files[:nb_file_overall]
 
 all_graphs = []
-print(f"Reading {len(all_files)} graphs ...")
+print(f"Reading {len(all_files)} Training graphs ...")
 with concurrent.futures.ProcessPoolExecutor() as executor:
     # Map the read_graph function to all files
     results = list(tqdm(executor.map(read_graph, all_files), total=len(all_files)))
     all_graphs.extend(results)
 
 nb_files = len(all_graphs)
-nb_supervised_files = int(nb_files * 0.005)
-nb_training_files = int(nb_files *0.895)
-nb_testing_files = int(nb_files * 0.1)
+nb_supervised_files = 20
+nb_training_files = nb_file_overall
 
 
-supervised_training_graphs = all_graphs[:nb_supervised_files]
-training_graphs = all_graphs[nb_supervised_files:nb_supervised_files + nb_training_files]
-testing_graphs = all_graphs[nb_supervised_files + nb_training_files:]
+#take nb_supervised_files random graphs
+
 
 test_every = 100
-
-print(f"Executing supervised training ...")
-for i, graph in enumerate(supervised_training_graphs):
-    file = all_files[i]
-    print(f"[{i} / {nb_supervised_files}] : Executing Training for {file}")
-    supervised_training(graph)
-    if i % test_every == 0:
-        print(f"Executing Testing for {file}")
-        reward, nb_found_keys, nb_keys = test_for_graph(graph)
-        print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+supervised_every = 50
 
 
 print(f"Executing Training ...")
 start_time = time.time()
 
+training_graphs = all_graphs#random.sample(all_graphs, nb_training_files)
 changed_lr = False
 for i, graph in enumerate(training_graphs):
     file = all_files[i]
 
     print(f"[{i} / {nb_training_files}] : Executing Training for {file}")
     execute_for_graph(graph, True)
-    if i % 50 == 0:
+    if i % 10 == 0:
         agent.save_checkpoint(i)
     if i % test_every == 0:
         print(f"Executing Testing for {file}")
         reward, nb_found_keys, nb_keys = test_for_graph(graph)
         print(f"Found {nb_found_keys} / {nb_keys} keys with a mean reward of {reward}")
+    if i % supervised_every == 0:
+        print(f"Executing supervised training ...")
+        supervised_training_graphs = random.sample(all_graphs, nb_supervised_files)
+        nb_supervised_files = len(supervised_training_graphs)
+        for j, graph in enumerate(supervised_training_graphs):
+            file = all_files[i]
+            print(f"[{j} / {nb_supervised_files}] : Executing STraining for {file}")
+            supervised_training(graph)
+
+
 stop_training_time = time.time()
 
 SHOW_GAPH_TEST = False
+
+#get all test files in the test folder recursively
+test_files = []
+for root, dirs, files in os.walk(TEST_FOLDER):
+    for file in files:
+        if file.endswith(".graphml"):
+            test_files.append(os.path.join(root, file))
+
+nb_testing_files = len(test_files)
+
+testing_graphs = []
+print(f"Reading {nb_testing_files} Testing graphs ...")
+with concurrent.futures.ProcessPoolExecutor() as executor:
+    # Map the read_graph function to all files
+    results = list(tqdm(executor.map(read_graph, test_files), total=len(test_files)))
+    testing_graphs.extend(results)
 
 print(f"Executing Testing ...")
 test_rewards = []
 test_success_rate = []
 for i, graph in enumerate(testing_graphs):
-    file = all_files[i]
+    file = test_files[i]
 
     print(f"[{i} / {nb_testing_files}] : Executing Testing for {file}")
     reward, nb_found_keys, nb_keys = test_for_graph(graph)
