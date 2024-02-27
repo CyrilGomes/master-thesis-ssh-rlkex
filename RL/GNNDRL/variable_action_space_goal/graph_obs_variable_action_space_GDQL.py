@@ -50,18 +50,18 @@ torch.autograd.set_detect_anomaly(True)
 # -------------------------
 # HYPERPARAMETERS
 # -------------------------
-BUFFER_SIZE = int(2e6)  # replay buffer size
-BATCH_SIZE = 350         # batch size
+BUFFER_SIZE = int(15e5)  # replay buffer size
+BATCH_SIZE = 500         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 100              # soft update of target parameters
-LR = 0.0001               # learning rate
-UPDATE_EVERY = 25        # how often to update the network
+LR = 0.000001               # learning rate
+UPDATE_EVERY = 10        # how often to update the network
 
 FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
-agent.load_checkpoint("/root/ssh-rlkex/models/smol_model_30.pt")
+agent.load_checkpoint("/root/ssh-rlkex/models/81_model.pt")
 root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib"
 root_detector = GraphPredictor(root_detection_model_path)
 
@@ -97,8 +97,9 @@ def test_for_graph(graph):
             
             action_mask = env._get_action_mask()
             visited_subgraph = env.get_visited_subgraph()
-            action = agent.act(observation, action_mask, goal_one_hot, visited_subgraph)
-            qvalues = agent.get_qvalues(observation, action_mask, goal_one_hot, visited_subgraph)
+            current_node_id = env.get_current_node()
+            action = agent.act(observation, action_mask, goal_one_hot, visited_subgraph, current_node_id)
+            qvalues = agent.get_qvalues(observation, action_mask, goal_one_hot, visited_subgraph, current_node_id)
             node_qvalues_map = {}
             for i, qvalue in enumerate(qvalues):
                 if action_mask[i] == 1:
@@ -120,7 +121,7 @@ def test_for_graph(graph):
 
 
 INIT_EPS = 1
-EPS_DECAY = 0.999997
+EPS_DECAY = 0.999993
 MIN_EPS = 0.03
 
 
@@ -148,7 +149,7 @@ def supervised_training(graph):
     num_episode_multiplier = 1
     if nb_of_nodes > 100:
         num_episode_multiplier = 2
-    num_episodes = 20 * num_episode_multiplier
+    num_episodes = 50 * num_episode_multiplier
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_key_found = 0
 
@@ -164,13 +165,13 @@ def supervised_training(graph):
         goal = target_nodes[goal]
         goal_one_hot = env.get_goal_one_hot(goal)
         env.set_target_goal(goal)
-        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph"])
+        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph","current_node_id", "next_current_node_id"])
         experiences = []
         while not done:
 
             action_mask = env._get_action_mask()
             visited_subgraph = env.get_visited_subgraph()
-
+            current_node_id = env.get_current_node()
             best_actions = env._get_best_action()
             if len(best_actions) == 0:
                 print("No best action")
@@ -179,8 +180,9 @@ def supervised_training(graph):
 
             next_action_mask = env._get_action_mask()
             next_visited_subgraph = env.get_visited_subgraph()
+            next_current_node_id = env.get_current_node()
 
-            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph))
+            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph, current_node_id, next_current_node_id))
 
             
             if done:
@@ -188,7 +190,7 @@ def supervised_training(graph):
             
             observation = new_observation
         for exp in experiences:
-            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph)
+            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph, exp.current_node_id, exp.next_current_node_id)
 
 
 
@@ -202,8 +204,28 @@ def supervised_training(graph):
 
 
 
+def pick_least_visited_goal(target_nodes, nb_keys_found):
+    # Extract the goal indices from target_nodes values
+    goal_indices = list(target_nodes.values())
+    
+    # Determine the number of keys found for each goal
+    relevant_nb_keys_found = np.array([nb_keys_found[i] for i in goal_indices])
+    
+    # Find the minimum number of keys found among the relevant goals
+    min_keys_found = np.min(relevant_nb_keys_found)
+    
+    # Identify all goals that are tied for the minimum number of keys found
+    least_visited_goals_indices = np.where(relevant_nb_keys_found == min_keys_found)[0]
+    
+    # If there's more than one, select one at random
+    selected_index = random.choice(least_visited_goals_indices)
+    
+    # Find the corresponding node ID for the selected goal index
+    selected_node_id = list(target_nodes.keys())[selected_index]
 
+    return selected_node_id
 def sample_goal(target_nodes, nb_keys_found):
+    return pick_least_visited_goal(target_nodes, nb_keys_found)
     # Extract the goal indices from target_nodes values
     goal_indices = list(target_nodes.values())
     
@@ -257,7 +279,7 @@ def execute_for_graph(graph, training = True):
         num_episode_multiplier = 2
     elif nb_of_nodes > 400:
         num_episode_multiplier = 3
-    num_episodes = 3000 * num_episode_multiplier
+    num_episodes = 350 * num_episode_multiplier
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -270,17 +292,16 @@ def execute_for_graph(graph, training = True):
 
     nb_moves_per_episode = []
     nb_keys_found = np.full(6,0)
-
     for episode in range_episode:
         observation = env.reset()
         episode_reward = 0
         episode_stats = {"nb_of_moves": 0}
         global EPS 
-        if training:
-            EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
+        #if training:
+            #EPS = EPS * EPS_DECAY if EPS > MIN_EPS else MIN_EPS
         
         #a function of episode over num_epsiode, such that at the end it is 0.05, linear
-        curr_eps = EPS
+        curr_eps = (1 - (episode / num_episodes)) * INIT_EPS
         curr_episode_rewards = []
         done = False
 
@@ -288,18 +309,20 @@ def execute_for_graph(graph, training = True):
         goal = target_nodes[goal]
         goal_one_hot = env.get_goal_one_hot(goal)
         env.set_target_goal(goal)
-        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph"])
+        experience = namedtuple("Experience", field_names=["observation", "action", "reward", "new_observation", "done", "next_action_mask", "visited_subgraph", "next_visited_subgraph", "current_node_id", "next_current_node_id"])
         experiences = []
         while not done:
 
             action_mask = env._get_action_mask()
             visited_subgraph = env.get_visited_subgraph()
-            action = agent.act(observation, action_mask, goal_one_hot,visited_subgraph, curr_eps)
+            current_node_id = env.get_current_node()
+            action = agent.act(observation, action_mask, goal_one_hot,visited_subgraph, current_node_id, curr_eps)
             new_observation, reward, done, info, new_goal = env.step(action)
             if new_goal is not None:
                 goal_one_hot = env.get_goal_one_hot(new_goal)
             next_action_mask = env._get_action_mask()
             next_visited_subgraph = env.get_visited_subgraph()
+            next_current_node_id = env.get_current_node()
             curr_episode_rewards.append(reward)
 
             metrics = {
@@ -308,7 +331,7 @@ def execute_for_graph(graph, training = True):
 
             }
             agent.log_metrics(metrics)
-            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph))
+            experiences.append(experience(observation, action, reward, new_observation, done, next_action_mask, visited_subgraph, next_visited_subgraph, current_node_id, next_current_node_id))
 
 
             episode_stats["nb_of_moves"] += 1
@@ -326,7 +349,7 @@ def execute_for_graph(graph, training = True):
             observation = new_observation
         
         for exp in experiences:
-            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph)
+            agent.step(exp.observation, exp.action, exp.reward, exp.new_observation, exp.done, exp.next_action_mask, goal_one_hot, exp.visited_subgraph, exp.next_visited_subgraph, exp.current_node_id, exp.next_current_node_id)
         episode_reward = np.sum(curr_episode_rewards)
         nb_moves_per_episode.append(episode_stats["nb_of_moves"])
 
@@ -376,7 +399,7 @@ EPS = INIT_EPS
 
 TEST_FOLDER = "Test_Graphs/"
 
-N = 3  # Set the number of files you want from each subfolder
+N = 20  # Set the number of files you want from each subfolder
 
 # Get all files in the folder recursively
 all_files = []

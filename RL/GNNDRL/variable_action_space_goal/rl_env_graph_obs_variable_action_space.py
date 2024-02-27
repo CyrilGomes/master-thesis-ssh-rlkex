@@ -238,6 +238,8 @@ class GraphTraversalEnv(gym.Env):
         return self.best_root
 
 
+
+
     def _update_action_space(self):
         """
         Updates the action space based on the current node.
@@ -407,7 +409,9 @@ class GraphTraversalEnv(gym.Env):
         return obs, reward, is_incorect_leaf, self._episode_info(), new_goal
         
 
-
+    def get_current_node(self):
+        #return the mapped index of the current node
+        return self.node_mapping[self.current_node]
 
     def _perform_action(self, action):
         """

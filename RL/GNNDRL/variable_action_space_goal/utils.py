@@ -90,13 +90,24 @@ class MyGraphData(Data):
         if key == 'edge_index_t':
             return self.x_t.size(0)
         if key == 'visited_subgraph':
+            return self.x_s.size(0)
+        if key == 'next_visited_subgraph':
+            return self.x_t.size(0)
+        if key == 'current_nd':
+            return self.x_s.size(0)
+        if key == 'next_current_nd':
             return self.x_t.size(0)
         if key == 'action':
             return self.x_s.size(0)
+        
         return super().__inc__(key, value, *args, **kwargs)
     
     def __cat_dim__(self, key, value, *args, **kwargs):
         if key == 'action':
+            return None
+        if key == 'current_nd':
+            return None
+        if key == 'next_current_nd':
             return None
         if key == 'reward':
             return None
