@@ -51,17 +51,17 @@ torch.autograd.set_detect_anomaly(True)
 # HYPERPARAMETERS
 # -------------------------
 BUFFER_SIZE = int(15e5)  # replay buffer size
-BATCH_SIZE = 500         # batch size
+BATCH_SIZE = 256         # batch size
 GAMMA = 0.99            # discount factor
 TAU = 100              # soft update of target parameters
-LR = 0.000001               # learning rate
+LR = 0.0001               # learning rate
 UPDATE_EVERY = 10        # how often to update the network
 
 FOLDER = "Generated_Graphs/"
 STATE_SPACE = 7
 EDGE_ATTR_SIZE = 1
 agent = Agent(STATE_SPACE,EDGE_ATTR_SIZE, seed=0, device=device, lr=LR, buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, gamma=GAMMA, tau=TAU, update_every=UPDATE_EVERY)
-agent.load_checkpoint("/root/ssh-rlkex/models/81_model.pt")
+agent.load_checkpoint("models/model_new_78.pt")
 root_detection_model_path="/root/ssh-rlkex/models/root_heuristic_model.joblib"
 root_detector = GraphPredictor(root_detection_model_path)
 
@@ -276,10 +276,10 @@ def execute_for_graph(graph, training = True):
 
     num_episode_multiplier = 1
     if nb_of_nodes > 200:
-        num_episode_multiplier = 2
+        num_episode_multiplier = 4
     elif nb_of_nodes > 400:
-        num_episode_multiplier = 3
-    num_episodes = 350 * num_episode_multiplier
+        num_episode_multiplier = 6
+    num_episodes = 1000 * num_episode_multiplier
     stats = {"nb_success": 0}
     range_episode = trange(num_episodes, desc="Episode", leave=True)
     max_reward = -np.inf
@@ -399,7 +399,7 @@ EPS = INIT_EPS
 
 TEST_FOLDER = "Test_Graphs/"
 
-N = 20  # Set the number of files you want from each subfolder
+N = 7  # Set the number of files you want from each subfolder
 
 # Get all files in the folder recursively
 all_files = []

@@ -11,7 +11,7 @@ import datetime
 import torch
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, GraphNorm, dense_diff_pool, DenseSAGEConv, TopKPooling
-from torch_geometric.utils import to_dense_batch, to_dense_adj
+from torch_geometric.utils import to_dense_batch, to_dense_adj, dense_to_sparse
 from torch_scatter import scatter_max, scatter_mean
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
@@ -25,7 +25,7 @@ import random
 
 from utils import MyGraphData
 from per import SumTree, Memory
-
+from torch_geometric.utils import subgraph
 
 class GraphQNetwork(torch.nn.Module):
     def __init__(self, num_node_features, num_edge_features, seed):
@@ -221,6 +221,139 @@ class GraphQNetwork(torch.nn.Module):
 
         return qvals
 
+class GraphQNetworkNew(torch.nn.Module):
+    def __init__(self, num_node_features, num_edge_features, seed):
+        super(GraphQNetworkNew, self).__init__()
+        self.seed = torch.manual_seed(seed)
+
+
+        # Define GAT layers
+        self.norm0 = GraphNorm(num_node_features)
+        self.norm_edge = GraphNorm(num_edge_features)
+
+        self.conv1 = GATv2Conv(num_node_features+2 , 500, edge_dim=num_edge_features, heads=2) #  16 + 10 = 26
+        self.norm1 = GraphNorm(1000)
+        
+        self.conv2 = GATv2Conv(1000, 500, edge_dim=num_edge_features, heads=2) # 26 + 20 = 44
+        self.norm2 = GraphNorm(1000)
+
+
+        self.graph_pooling = TopKPooling(1000, ratio=0.8)
+        self.graph_embedder = torch.nn.Linear(1000, 512)
+        self.graph_embedder_2 = torch.nn.Linear(512, 128)
+
+        self.subgraph_pooling = TopKPooling(1000, ratio=0.8)
+        self.subgraph_embedder = torch.nn.Linear(1000, 512)
+        self.subgraph_embedder_2 = torch.nn.Linear(512, 128)
+
+
+
+        self.qvalue_goal_branches = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(2256, 512),
+                torch.nn.ReLU(),
+                torch.nn.Linear(512, 256),
+                torch.nn.ReLU(),
+                torch.nn.Linear(256, 1)
+            ) for _ in range(6)
+        ])
+
+        
+
+    def forward(self, x, edge_index, edge_attr, batch , action_mask, goal, visited_subgraph, subgraph_node_indices_batch, current_node):  
+
+ 
+
+        if action_mask is not None:
+            action_mask = action_mask.to(x.get_device())
+
+        if batch is None:
+            
+            batch = torch.zeros(x.shape[0], dtype=torch.long)
+        
+
+        batch = batch.to(x.get_device())
+
+
+
+        # Process with GAT layers
+        x = self.norm0(x, batch)
+
+        edge_attr = self.norm_edge(edge_attr, batch[edge_index[0]])
+        current_node_feature = x[current_node]
+
+
+        #embed the mean of the attributes of the outgoing edges of each node
+        edge_attr_in_mean = scatter_mean(edge_attr, edge_index[0], dim=0, dim_size=x.shape[0])
+        edge_attr_out_mean = scatter_mean(edge_attr, edge_index[1], dim=0, dim_size=x.shape[0])
+
+        x = torch.cat([x, edge_attr_in_mean, edge_attr_out_mean], dim=-1)
+
+
+        # First GAT layer with skip connection
+        x = self.conv1(x, edge_index, edge_attr)
+        x = self.norm1(x, batch)
+
+
+        x = self.conv2(x, edge_index, edge_attr)
+        x = self.norm2(x, batch)
+
+        goal_indices = goal.argmax(dim=1)  # Assuming one-hot encoded goals
+        #expand goal indices for each node of the correpsonding batch
+        goal_indices = goal_indices[batch]
+
+
+        #graph_embedding_mean = global_mean_pool(x, batch)
+        graph_embedding, graph_edge_index, _, graph_batch, _, _ = self.graph_pooling(x, edge_index, edge_attr, batch)
+        graph_embedding = global_mean_pool(graph_embedding, graph_batch)
+        graph_embedding = F.relu(self.graph_embedder(graph_embedding))
+        graph_embedding = self.graph_embedder_2(graph_embedding)
+        
+        # Extract subgraph embeddings using the adjusted indices
+   
+        # Compute the global mean for each subgraph
+        #subgraph_embedding_mean = global_mean_pool(subgraph_embeddings, subgraph_node_indices_batch)
+        x_sub = x[visited_subgraph]
+        subgraph_embedding = global_mean_pool(x_sub, subgraph_node_indices_batch)
+
+        subgraph_embedding = F.relu(self.subgraph_embedder(subgraph_embedding))
+        subgraph_embedding = self.subgraph_embedder_2(subgraph_embedding)
+
+        #concat the graph level embedding with each node of the corresponding graph with batch
+
+        #we have one current node for each graph (per batch)
+        conc_state = torch.cat([x, graph_embedding[batch], subgraph_embedding[batch], x[current_node][batch]], dim=-1)
+
+        #state_embedding = torch.zeros_like(conc_state[:,:10])  # Adjust size accordingly
+        """
+        # Iterate over each goal-specific branch
+        for i, branch in enumerate(self.state_goal_branches):
+            mask = goal_indices == i
+            if mask.any():
+                state_embedding[mask] = branch(conc_state[mask])
+        """
+        # Compute Q-values for each goal
+        qvals = torch.zeros(x.shape[0]).to(x.get_device())
+        for i, branch in enumerate(self.qvalue_goal_branches):
+            
+            mask = goal_indices == i
+            if mask.any():
+                qvals[mask] = branch(conc_state[mask]).squeeze()
+
+        # Apply action mask if provided
+        if action_mask is not None:
+            action_mask = action_mask.to(qvals.device)
+
+            #action_mask = action_mask.unsqueeze(1)
+            # Set Q-values of valid actions (where action_mask is 1) as is, and others to -inf should be on dimension 0
+            qvals = torch.where(action_mask == 1, qvals, torch.tensor(-1e+8).to(qvals.device))
+        
+        #check if qvals contains nan
+        if torch.isnan(qvals).any():
+            raise ValueError("Qvals contains nan")
+
+        return qvals
+
 
 
 # -------------------------
@@ -244,8 +377,8 @@ class Agent:
 
 
         # Q-Network
-        self.qnetwork_local = GraphQNetwork(state_size, self.edge_attr_size, seed).to(device)
-        self.qnetwork_target = GraphQNetwork(state_size, self.edge_attr_size,seed).to(device)
+        self.qnetwork_local = GraphQNetworkNew(state_size, self.edge_attr_size, seed).to(device)
+        self.qnetwork_target = GraphQNetworkNew(state_size, self.edge_attr_size,seed).to(device)
 
         class_name = self.qnetwork_local.__class__.__name__
         self.file_name = f"VACTION_SPACE_GOAL_{class_name}_{date}"
