@@ -1,0 +1,17 @@
+[package]
+name = "graph_gen_rust"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+petgraph = "0.6.4"
+regex = "1.10.2"
+serde_json = "1.0.108"
+indicatif = "0.17.7"
+petgraph-graphml = "3.0.0"
+lazy_static = "1.4.0"
+rayon = "1.8.0"
+walkdir = "2.4.0"
+rand = "0.8.5"
