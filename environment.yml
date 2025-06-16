@@ -1,23 +1,34 @@
-name: PhD-Track
+name: ssh-rlkex
 channels:
+  - pytorch
+  - pyg
+  - conda-forge
   - defaults
 dependencies:
   - python=3.9
-  - matplotlib==3.5.1
-  - networkx
-  - scipy
-  - plotly
-  - pygraphviz
-  - pyg
-  - torchvision
-  - pytorch
+  - pip=22.3.1
+  # Deep Learning
+  - pytorch=2.0.0
   - pytorch-cuda=11.7
-  - torchaudio
-  - ipykernel
-  - graphistry
-  - seaborn
-  - gym
-  - stable-baselines3
-  - numba
-  - tensorboard
-prefix: /home/cyril/anaconda3/envs/PhD-Track
+  - torchvision=0.15.0
+  - torchaudio=2.0.0
+  - pytorch-geometric=2.3.0
+  # RL Dependencies
+  - gym=0.21.0
+  - stable-baselines3=1.8.0
+  - tensorboard=2.12.0
+  # Visualization
+  - matplotlib=3.5.1
+  - seaborn=0.12.2
+  - plotly=5.13.1
+  - graphistry=0.28.0
+  # Scientific Computing
+  - networkx=3.1
+  - scipy=1.10.1
+  - numba=0.56.4
+  # Development
+  - ipykernel=6.22.0
+  - jupyter=1.0.0
+  - pip:
+    - pygraphviz==1.10
+    - torch-geometric==2.3.0
