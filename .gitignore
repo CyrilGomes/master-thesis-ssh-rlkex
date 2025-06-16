@@ -28,6 +28,8 @@ wheels/
 .venv
 venv/
 ENV/
+.python-version
+.pyenv
 
 # Data and Models
 Generated_Graphs/
@@ -48,6 +50,26 @@ Graph_Gen/graph_gen_rust/target/
 # OS
 .DS_Store
 .directory
+
+# Temp and output files
+*.log
+*.tmp
+*.temp
+*.out
+graph.html
+output/
+results/
+
+# Coverage and testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Documentation
+_build/
+_static/
+_templates/
 .Trash-*
 
 # Generated files

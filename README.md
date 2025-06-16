@@ -98,17 +98,19 @@ If you use this code or find our work helpful, please cite:
 
 ```bibtex
 @mastersthesis{gomes2025rlkex,
-  author  = {Gomes, Cyril},
-  title   = {Utilizing Graph and Reinforcement Learning Algorithms for SSH Key Retrieval from Heap Memory Dumps},
-  school  = {Universität Passau},
-  year    = {2025},
-  address = {Passau, Germany},
-  month   = {June}
+  author      = {Gomes, Cyril},
+  title       = {SSH Key Retrieval using Graph-based Reinforcement Learning},
+  school      = {Universität Passau},
+  year        = {2025},
+  address     = {Passau, Germany},
+  month       = {1},
+  type        = {Master's Thesis},
+  supervisor  = {Granitzer, Michael and Kosch, Harald}
 }
 ```
 
 ## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## References
 [1] Fellicious et al., "Memory Dumps Analysis for Forensic Investigation", 2022.
