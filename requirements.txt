@@ -1,0 +1,25 @@
+# Core Dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+torch-geometric>=2.3.0
+
+# Reinforcement Learning
+gym==0.21.0
+stable-baselines3==1.8.0
+tensorboard==2.12.0
+
+# Data Science & Visualization
+matplotlib==3.5.1
+seaborn==0.12.2
+plotly==5.13.1
+graphistry==0.28.0
+networkx==3.1
+scipy==1.10.1
+numba==0.56.4
+
+# Development
+jupyter==1.0.0
+ipykernel==6.22.0
+
+# Additional Requirements
+pygraphviz==1.10

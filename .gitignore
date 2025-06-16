@@ -1,5 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment
+.env
+.venv
+venv/
+ENV/
+
+# Data and Models
 Generated_Graphs/
 Data/
-Graph_Gen/graph_gen_rust/target/
 runs/
 models/rl
+
+# Rust
+Graph_Gen/graph_gen_rust/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.directory
+.Trash-*
+
+# Generated files
+graph.html
+*.html
+!Graph_Insights/templates/*.html
